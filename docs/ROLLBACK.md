@@ -43,3 +43,23 @@ Do not delete `/media/cinema-studio/` while a script may still call the new path
 If something unexpected is wrong with Home Assistant itself, restore the full backup created in the pre-flight step from **Settings > System > Backups**. This returns configuration, scripts and App data to that point in time, so any session history, helper values and edits made after the backup are lost. Prefer the one-step script rollback; use the backup only when that is not enough.
 
 After a restore, Cinema Studio recovers by itself: the integration re-declares the renders its restored catalog holds before it selects anything, renders that no longer exist fail the file check and are not played, and the App never deletes a render that a consumer still holds or has pinned.
+
+## If Home Assistant Core does not start after the restart
+
+A failing custom integration does not stop Core from starting (Home Assistant isolates
+integration setup errors), and the configuration check runs before the restart. If Core
+still does not come back within ~10 minutes, recovery has to go through the Supervisor,
+because every tool that talks to Home Assistant goes through Core:
+
+1. Open the Home Assistant OS console (keyboard/monitor on the VM, or the hypervisor
+   console) or the Supervisor Observer page at `http://<ha-host>:4357`.
+2. Restore the pre-migration backup **`pre-cinema-studio-2026-10-05`** (id `83c82f79`),
+   taken before the integration was downloaded, so it contains no `cinema_studio` files:
+
+   ```bash
+   ha backups restore 83c82f79
+   ```
+
+   The backup is protected with your default backup password (Settings → System →
+   Backups → encryption key / emergency kit).
+3. Core restarts with the configuration exactly as it was before the migration.
