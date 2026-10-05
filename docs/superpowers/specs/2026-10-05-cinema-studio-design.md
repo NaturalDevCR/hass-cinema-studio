@@ -242,8 +242,11 @@ early deletion.
   AAC 192k 48 kHz, −18 LUFS/−1.5 dBTP/LRA 11, intro+outro
   `treebu-hotels-intro.mp4`, 1 s transitions, fades 1/1.5 s); import copies
   it with the same id. Each collection has `processing_profile_id`.
-- `Asset`: intro/outro files under `/media/cinema-studio/assets/` (imported
-  by hard link + fingerprint from the Worker's assets).
+- `Asset`: intro/outro files under `/media/cinema-studio/assets/`. The old
+  Worker keeps assets in its private `/data/assets` (unreachable), so import
+  records referenced assets as `missing`; imported renders already contain
+  them, and only a new render with that profile is blocked (clear error +
+  UI prompt to upload the asset) until the user provides the file.
 - `NormalizationProfile`: named loudness presets as Sound Effects
   (`standard -16`, `loud -13`, `soft -20`, `voice -18`, plus imported
   `cinema -18`). A clip recipe may set `profile_id` to override the
