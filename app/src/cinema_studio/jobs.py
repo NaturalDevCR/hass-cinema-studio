@@ -492,6 +492,7 @@ class JobQueue:
         entry.touched = True
         clip = self._repo.set_status(clip_id, "processing")
         source = self._original_path(clip)
+        expected_relative_path = clip.original.filename if clip.original is not None else None
         if not source.is_file():
             raise media.MediaError("The original video file is missing")
         info = await probe(source)
@@ -510,7 +511,11 @@ class JobQueue:
             video_codec=info.video_codec or "",
         )
         clip.recipe.validate_for(original)
-        self._repo.set_original(clip_id, original)
+        if not self._repo.set_original_if(
+            clip_id, original, expected_relative_path=expected_relative_path
+        ):
+            _LOGGER.info("Skipping stale probe for %s: original source was replaced", clip_id)
+            return
         self.enqueue_render(clip_id)
         self.enqueue_thumbs(clip_id)
 

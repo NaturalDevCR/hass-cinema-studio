@@ -13,6 +13,7 @@ import uuid
 from contextlib import suppress
 from pathlib import Path
 from typing import Literal, cast
+from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -597,10 +598,18 @@ async def _replace_source_settled(
 
 @router.post("/clips/{clip_id}/source")
 async def replace_source(clip_id: str, data: SourceReplace, request: Request) -> Clip:
-    locks: dict[str, asyncio.Lock] = request.app.state.source_locks
-    lock = locks.setdefault(clip_id, asyncio.Lock())
-    async with lock:
-        return await _replace_source(clip_id, data, request)
+    _repo(request).get_clip(clip_id)  # reject unknown ids before registering a lock
+    locks: WeakValueDictionary[str, asyncio.Lock] = request.app.state.source_locks
+    lock = locks.get(clip_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[clip_id] = lock
+    try:
+        async with lock:
+            return await _replace_source(clip_id, data, request)
+    finally:
+        # Error tracebacks can retain this frame; waiters keep their own strong references.
+        del lock
 
 
 async def _replace_source(clip_id: str, data: SourceReplace, request: Request) -> Clip:

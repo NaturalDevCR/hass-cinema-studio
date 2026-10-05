@@ -1209,14 +1209,18 @@ async def test_concurrent_source_replacements_serialize(
         idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": first_id})
     )
     await asyncio.wait_for(first_entered.wait(), 10)
+    first_lock = app.state.source_locks[clip_id]
     second = asyncio.create_task(
         idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": second_id})
     )
     try:
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(second_entered.wait(), 0.1)
+        assert app.state.source_locks[clip_id] is first_lock
         release.set()
         first_response, second_response = await asyncio.gather(first, second)
+        del first_lock
+        assert not app.state.source_locks
         assert first_response.status_code == second_response.status_code == 200
         old = paths.originals_dir / clip_id / first_response.json()["original"]["filename"]
         assert old.is_file() and (old.parent / ".retired").is_file()
@@ -1305,3 +1309,67 @@ async def test_retired_original_cleanup_requires_age_and_no_db_reference(
     monkeypatch.setattr(lifecycle.time, "time", lambda: now + 7202)
     assert lifecycle.purge_retired_originals(paths, repo) == 0
     assert new.is_file()
+
+
+async def test_stale_probe_cannot_overwrite_committed_replacement(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    make_video: Video,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
+    monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
+    clip_id = needs_source_clip(repo)
+
+    async def replace(name: str, width: int) -> None:
+        upload_id = await start_upload(idle, make_video(name=name, seconds=2, width=width))
+        response = await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": upload_id})
+        assert response.status_code == 200
+
+    await replace("old.mp4", 320)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_probe = jobs_module.probe
+
+    async def paused(source: Path):
+        entered.set()
+        await release.wait()
+        return await real_probe(source)
+
+    monkeypatch.setattr(jobs_module, "probe", paused)
+    entry = jobs_module._Entry(app.state.jobs.enqueue_probe(clip_id))
+    task = asyncio.create_task(app.state.jobs._probe(entry, clip_id))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        await replace("new.mp4", 192)
+        committed = repo.get_clip(clip_id)
+        assert committed.original is not None and committed.original.width == 192
+
+        def forbidden(*args: object, **kwargs: object) -> None:
+            pytest.fail("stale probe must not enqueue jobs")
+
+        monkeypatch.setattr(app.state.jobs, "enqueue_render", forbidden)
+        monkeypatch.setattr(app.state.jobs, "enqueue_thumbs", forbidden)
+        release.set()
+        await task
+        assert repo.get_clip(clip_id) == committed
+        assert "Skipping stale probe" in caplog.text
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+@pytest.mark.parametrize("exists", [False, True])
+async def test_source_locks_reclaimed_after_not_found(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    exists: bool,
+):
+    clip_id = needs_source_clip(repo) if exists else "unknown"
+    response = await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": "unknown"})
+    assert response.status_code == 404
+    assert not app.state.source_locks

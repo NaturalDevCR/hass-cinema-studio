@@ -11,6 +11,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from functools import partial
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -86,7 +87,7 @@ def create_app(
         engine = RenderEngine(FfmpegCommandBuilder(), timeout_for=render_timeout)
         state = app.state
         state.discovery_lock = asyncio.Lock()
-        state.source_locks = {}
+        state.source_locks = WeakValueDictionary[str, asyncio.Lock]()
         state.paths = paths
         state.db = db
         state.repo = repo

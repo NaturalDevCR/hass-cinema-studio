@@ -1014,3 +1014,34 @@ def test_atomic_legacy_clip_without_output(repo: Repository) -> None:
     assert clip.render is None and clip.needs_source and clip.status == "failed"
     assert clip.error == "no usable source or output (re-import or upload source)"
     assert repo.catalog_revision() == before + 1
+
+
+@pytest.mark.parametrize("has_original", [False, True])
+def test_set_original_if_matches_current_path(repo: Repository, has_original: bool):
+    clip = repo.create_clip(
+        clip_id=None,
+        collection_id="regular",
+        title="Movie",
+        source_name="movie.mp4",
+        recipe=Recipe(),
+        original=original() if has_original else None,
+        sort_key="movie",
+    )
+    expected = clip.original.filename if clip.original is not None else None
+    info = original(30).model_copy(update={"filename": "v" + "a" * 32 + "/movie.mp4"})
+    revision = repo.catalog_revision()
+    assert repo.set_original_if(clip.id, info, expected_relative_path=expected) is True
+    assert repo.get_clip(clip.id).original == info
+    assert repo.catalog_revision() == revision
+
+
+def test_set_original_if_stale_path_changes_nothing(repo: Repository, revisions: list[int]):
+    clip_id = make_clip(repo)
+    replacement = original(30).model_copy(update={"filename": "v" + "b" * 32 + "/new.mp4"})
+    repo.replace_original(clip_id, replacement)
+    before = repo.get_clip(clip_id)
+    revision = repo.catalog_revision()
+    callbacks = list(revisions)
+    assert repo.set_original_if(clip_id, original(), expected_relative_path="movie.mp4") is False
+    assert repo.get_clip(clip_id) == before
+    assert repo.catalog_revision() == revision and revisions == callbacks

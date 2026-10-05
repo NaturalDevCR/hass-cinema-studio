@@ -983,6 +983,24 @@ class Repository:
             )
             return _get_clip(tx.conn, clip_id)
 
+    def set_original_if(
+        self, clip_id: str, info: OriginalInfo, *, expected_relative_path: str | None
+    ) -> bool:
+        """Publish probe metadata only while its source is still current.
+
+        A null expected path denotes an upload whose original has not yet been probed.
+        """
+        with self._write() as tx:
+            clip = _get_clip(tx.conn, clip_id)
+            current_path = clip.original.filename if clip.original is not None else None
+            if current_path != expected_relative_path:
+                return False
+            tx.conn.execute(
+                "UPDATE clips SET original = ?, updated_at = ? WHERE id = ?",
+                (info.model_dump_json(), utcnow_iso(), clip_id),
+            )
+            return True
+
     def replace_original(self, clip_id: str, original: OriginalInfo) -> Clip:
         """Publish a placed version and its source/render flags in one transaction."""
         with self._write() as tx:
