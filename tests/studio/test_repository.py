@@ -248,18 +248,28 @@ def test_non_catalog_writes_do_not_bump(repo: Repository, revisions: list[int]) 
     assert repo.catalog_revision() == 0
 
 
-def test_status_ready_and_failed_and_pending_flag_bump(
+def test_status_changes_never_bump_but_the_pending_flag_does(
     repo: Repository, revisions: list[int]
 ) -> None:
     clip_id = make_clip(repo)
     repo.set_status(clip_id, "failed", "boom")
-    assert revisions == [1]
     repo.set_status(clip_id, "ready")
-    assert revisions == [1, 2]
+    assert revisions == []
     repo.set_flags(clip_id, render_pending=True)
-    assert revisions == [1, 2, 3]
+    assert revisions == [1]
     repo.set_flags(clip_id, render_pending=True)  # unchanged
-    assert revisions == [1, 2, 3]
+    assert revisions == [1]
+
+
+def test_publish_render_can_keep_the_pending_flag(repo: Repository, revisions: list[int]) -> None:
+    clip_id = make_clip(repo)
+    repo.set_recipe(clip_id, Recipe(gain_db=1.0))
+    assert repo.get_clip(clip_id).render_pending
+    clip = repo.publish_render(make_render(clip_id), clear_pending=False)
+    assert clip.render_pending and clip.status == "ready" and clip.render is not None
+    assert revisions[-1] == repo.catalog_revision()
+    clip = repo.publish_render(make_render(clip_id, 2))
+    assert not clip.render_pending
 
 
 def test_failed_write_does_not_bump(repo: Repository, revisions: list[int]) -> None:

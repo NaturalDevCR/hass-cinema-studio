@@ -923,7 +923,6 @@ class Repository:
                 "UPDATE clips SET status = ?, error = ?, updated_at = ? WHERE id = ?",
                 (status, error, utcnow_iso(), clip_id),
             )
-            tx.bump = status in ("ready", "failed")
             return _get_clip(tx.conn, clip_id)
 
     def set_flags(
@@ -1002,12 +1001,14 @@ class Repository:
         with self._read() as conn:
             return _next_render_n(conn, clip_id)
 
-    def publish_render(self, render: RenderRecord) -> Clip:
+    def publish_render(self, render: RenderRecord, *, clear_pending: bool = True) -> Clip:
         """Publish a render atomically.
 
         Insert it, point the clip at it, retire the previous published render (stamped with the
-        new catalog revision), mark the clip ready and bump the revision. The timing is rounded
-        and checked first; nothing changes when it violates an invariant.
+        new catalog revision), mark the clip ready and bump the revision. ``clear_pending=False``
+        keeps ``render_pending`` as it is (the render was made from inputs that are no longer
+        current). The timing is rounded and checked first; nothing changes when it violates an
+        invariant.
         """
         timing = validate_timing(
             Timing(
@@ -1041,8 +1042,9 @@ class Repository:
                 _retire_published(conn, previous, _read_revision(conn) + 1)
             conn.execute(
                 "UPDATE clips SET published_render_id = ?, status = 'ready', error = NULL,"
-                " render_pending = 0, updated_at = ? WHERE id = ?",
-                (record.id, now, record.clip_id),
+                " render_pending = CASE WHEN ? THEN 0 ELSE render_pending END, updated_at = ?"
+                " WHERE id = ?",
+                (record.id, int(clear_pending), now, record.clip_id),
             )
             tx.bump = True
             return _get_clip(conn, record.clip_id)
