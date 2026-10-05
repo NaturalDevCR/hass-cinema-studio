@@ -101,16 +101,16 @@
         {
           "variables": {
             "seleccion": "{{ nuevo }}",
-            "coleccion": "{{ nuevo.collection_id }}",
-            "clip_uri": "{{ nuevo.media_content_id }}",
-            "clip_id": "{{ nuevo.clip_id }}",
-            "clip_nombre": "{{ nuevo.title or nuevo.source_name or nuevo.clip_id }}",
-            "duracion": "{{ nuevo.duration }}",
-            "content_start": "{{ nuevo.content_start_offset }}",
-            "content_end": "{{ nuevo.content_end_offset }}",
-            "lead_in": "{{ nuevo.lead_in_duration }}",
-            "tail_out": "{{ nuevo.tail_out_duration }}",
-            "cierre_anticipado_habilitado": "{{ nuevo.tail_out_duration | float >= 1.0 }}",
+            "coleccion": "{{ nuevo.get('collection_id') }}",
+            "clip_uri": "{{ nuevo.get('media_content_id') }}",
+            "clip_id": "{{ nuevo.get('clip_id') }}",
+            "clip_nombre": "{{ nuevo.get('title') or nuevo.get('source_name') or nuevo.get('clip_id') }}",
+            "duracion": "{{ nuevo.get('duration') }}",
+            "content_start": "{{ nuevo.get('content_start_offset') }}",
+            "content_end": "{{ nuevo.get('content_end_offset') }}",
+            "lead_in": "{{ nuevo.get('lead_in_duration') }}",
+            "tail_out": "{{ nuevo.get('tail_out_duration') }}",
+            "cierre_anticipado_habilitado": "{{ nuevo.get('tail_out_duration') | float(0) >= 1.0 }}",
             "ruta": "cinema_studio"
           },
           "alias": "Cinema Studio: mapear respuesta a variables del script"
