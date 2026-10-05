@@ -229,15 +229,25 @@ early deletion.
 
 - `Collection`: `id` (slug, immutable; import keeps `regular`, `halloween`),
   `name`, `color`, `icon`, `playback_mode` (`random|sequential|custom`),
-  `order` (clip ids, for `custom`), `default_profile_id`, `enabled`.
+  `order` (clip ids, for `custom`), `processing_profile_id`, `enabled`.
 - `Season`: `id`, `name`, `color`, `icon`, `start`/`end` (`MM-DD`,
   inclusive, may wrap), `priority`, `collection_id` (which collection plays
   in that season). Built-in `regular` (no range, fallback, plays
   `regular`).
-- `NormalizationProfile`: as Sound Effects (`standard -16`, `loud -13`,
-  `soft -20`, `voice -18`), applied to the audio track.
-- `CastProfile`: ported from Clips (container/codec/resolution/fps limits);
-  one default `chromecast_gtv` matching what production plays today.
+- `ProcessingProfile`: ported verbatim from Clips
+  (`profile_validation.ProcessingProfile`: video/audio encode settings,
+  scaling, two-pass loudness, clip fade in/out, intro/outro asset references,
+  intro→clip / clip→outro transitions, timeouts). Production uses
+  `4k-loudness-with-intro` (3840×2160@24 libx264 crf 23, maxrate 20 Mb/s,
+  AAC 192k 48 kHz, −18 LUFS/−1.5 dBTP/LRA 11, intro+outro
+  `treebu-hotels-intro.mp4`, 1 s transitions, fades 1/1.5 s); import copies
+  it with the same id. Each collection has `processing_profile_id`.
+- `Asset`: intro/outro files under `/media/cinema-studio/assets/` (imported
+  by hard link + fingerprint from the Worker's assets).
+- `NormalizationProfile`: named loudness presets as Sound Effects
+  (`standard -16`, `loud -13`, `soft -20`, `voice -18`, plus imported
+  `cinema -18`). A clip recipe may set `profile_id` to override the
+  processing profile's loudness target for that clip; null = profile's own.
 - `Clip`: `id` (UUID; imports keep the Worker id), `collection_id`, `title`,
   `source_name`, `enabled`, `notes`, `original` (probe data),
   `recipe`, `published_render_id`, `status`
@@ -246,8 +256,9 @@ early deletion.
   sequential key).
 - `Recipe`: `trim_start`, `trim_end`, `crop` (`{x,y,w,h}` or null),
   `fade_in`, `fade_out` (video+audio, inside the content region),
-  `gain_db`, `profile_id`, `lead_in` / `tail_out` (black/silent margins,
-  default 2.0 s each, from settings), `cast_profile_id`.
+  `gain_db`, `profile_id` (normalization override), `lead_in` / `tail_out`
+  (black/silent margins, default 2.0 s each, from settings). Clip fades in
+  the recipe default to null = use the processing profile's fades.
 - `Render`: `id` (= `render_uuid`), `clip_id`, `n`, `relative_path`, `size`, `sha256`,
   `duration`, `content_start`, `content_end`, `lead_in`, `tail_out`,
   `content_duration`, `timing_source` (`measured|legacy_worker|legacy_full_file`),
@@ -422,7 +433,8 @@ token.
 `cinema_studio.import_legacy` (integration service, idempotent):
 
 1. Reads the old `cinema_collections` config entry (same HA) and uses its
-   stored host/secret to fetch clips, collections (mode, order), profiles,
+   stored `endpoint`/`token` to fetch clips, collections (mode, order),
+   processing profiles, assets,
    and Worker status — no credential handling by people or tools.
    Quiescence is enforced for the whole operation: refuses to start unless
    the Worker reports no queued/active jobs and it is not within 03:00–03:30
