@@ -21,11 +21,11 @@ from .auth import TokenStore, require_ingress
 from .config import Paths
 from .db import Database
 from .errors import ConflictError, InvalidError, NotFoundError
-from .fence import GarbageCollector, GcFence
+from .fence import GarbageCollector, GcFence, GcResult
 from .ffmpeg import FfmpegCommandBuilder
 from .jobs import JobQueue, render_timeout
 from .legacy import LegacyImporter
-from .models import ProcessingProfileUpdate
+from .models import ProcessingProfileUpdate, utcnow_iso
 from .notifier import CatalogNotifier
 from .profiles import validate_settings
 from .render import RenderEngine
@@ -79,7 +79,9 @@ def create_app(
         _fill_seed_profile_settings(repo)
         store = MediaStore(paths)
         fence = GcFence(paths)
-        gc = GarbageCollector(paths, repo, fence, store)
+        gc = _RecordingCollector(
+            paths, repo, fence, store, on_result=lambda result: _record_gc(app, result)
+        )
         engine = RenderEngine(FfmpegCommandBuilder(), timeout_for=render_timeout)
         state = app.state
         state.discovery_lock = asyncio.Lock()
@@ -90,6 +92,7 @@ def create_app(
         state.engine = engine
         state.fence = fence
         state.gc = gc
+        state.gc_last = None  # (GcResult, finished_at) of the latest collection, for the UI
         state.jobs = JobQueue(repo, store, engine, paths, gc)
         state.tokens = TokenStore(paths.data_dir / "api_token")
         state.supervisor = supervisor if supervisor is not None else SupervisorClient(None)
@@ -108,6 +111,31 @@ def create_app(
         db.close()
         raise
     return app
+
+
+class _RecordingCollector(GarbageCollector):
+    """The garbage collector, reporting every finished run (hourly or manual) to the app."""
+
+    def __init__(
+        self,
+        paths: Paths,
+        repo: Repository,
+        fence: GcFence,
+        store: MediaStore,
+        *,
+        on_result: Callable[[GcResult], None],
+    ) -> None:
+        super().__init__(paths, repo, fence, store)
+        self._on_result = on_result
+
+    def run(self) -> GcResult:
+        result = super().run()
+        self._on_result(result)
+        return result
+
+
+def _record_gc(app: FastAPI, result: GcResult) -> None:
+    app.state.gc_last = (result, utcnow_iso())
 
 
 def _fill_seed_profile_settings(repo: Repository) -> None:
