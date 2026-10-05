@@ -111,7 +111,10 @@ type Collection = { id: string; name: string; color: string; icon: string;
 type NormalizationProfile = { id: string; name: string; target_lufs: number; true_peak: number; lra: number }
 type ProcessingProfile = { id: string; name: string; settings: ProcessingProfileSettings }
   // settings = Clips ProcessingProfile.model_dump(mode="json") verbatim
-type Asset = { filename: string; size: number | null; status: "ready" | "missing" }
+type Asset = { filename: string; size: number | null; sha256: string | null; status: "ready" | "missing" }
+type Affected<K extends string, T> = { [P in K]: T } & { affected_clip_ids: string[] }
+  // PATCH collections → Affected<"collection", Collection>; PATCH processing-profiles → Affected<"profile", ProcessingProfile>;
+  // PATCH normalization-profiles → Affected<"profile", NormalizationProfile>; POST assets → Affected<"asset", Asset>
 type Crop = { x: number; y: number; w: number; h: number }      // source pixels
 type Recipe = { trim_start: number; trim_end: number | null; crop: Crop | null;
   fade_in: number | null; fade_out: number | null;               // null = processing profile fades
@@ -195,16 +198,17 @@ Legacy import is two calls so the App never needs Worker credentials: (1) `POST 
 | GET / PUT | `settings` | `Settings` | `Settings` |
 | GET | `collections` | – | `Collection[]` |
 | POST | `collections` | `{id?, name, color?, icon?, playback_mode?, processing_profile_id?}` | `Collection` |
-| PATCH | `collections/{id}` | partial (no id) | `Collection` |
+| PATCH | `collections/{id}` | partial (no id) | `{collection: Collection, affected_clip_ids: string[]}` |
 | PUT | `collections/{id}/order` | `{clip_ids: string[]}` | `Collection` |
 | DELETE | `collections/{id}` | – | `204` (409 when clips or seasons reference it; 400 for `regular`) |
 | GET/POST/PATCH/DELETE | `seasons`, `seasons/{id}` | as SE + `collection_id` | `Season` / `204` |
 | GET | `seasons/resolve?date=YYYY-MM-DD` | – | `{date, season_id, collection_id}` |
 | GET/POST/PATCH/DELETE | `normalization-profiles[/{id}]` | as SE profiles | as SE (PATCH returns `{profile, affected_clip_ids}`) |
 | POST | `normalization-profiles/{id}/apply` | `{clip_ids: string[]}` or `{collection_id}` | `{queued: number}` |
-| GET/POST/PATCH/DELETE | `processing-profiles[/{id}]` | `{id?, name, settings}` | `ProcessingProfile` (409 delete when used) |
+| GET / POST / DELETE | `processing-profiles[/{id}]` | `{id?, name, settings}` | `ProcessingProfile[]` / `ProcessingProfile` / `204` (409 when used) |
+| PATCH | `processing-profiles/{id}` | `{name?, settings?}` | `{profile: ProcessingProfile, affected_clip_ids: string[]}` |
 | GET | `assets` | – | `Asset[]` |
-| POST | `assets` | multipart `file` | `Asset` |
+| POST | `assets` | multipart `file` | `{asset: Asset, affected_clip_ids: string[]}` |
 | DELETE | `assets/{filename}` | – | `204` (409 when a profile references it) |
 | GET | `clips` / `clips/{id}` | – | `Clip[]` / `Clip` |
 | PATCH | `clips/{id}` | `{title?, collection_id?, enabled?, notes?}` | `Clip` |
@@ -595,7 +599,8 @@ RenderState = Literal["published", "retired", "unrecognized", "missing", "delete
 class Repository:
     def __init__(self, db: Database, on_catalog_change: Callable[[int], None] | None = None) -> None
     # seasons / collections / normalization profiles / processing profiles / assets: list/get/create/update/delete
-    def set_collection_order(self, collection_id: str, clip_ids: list[str]) -> Collection
+    def set_collection_order(self, collection_id: str, clip_ids: list[str], *, user_edit: bool = True) -> Collection
+    # update_collection(..., user_edit=True) likewise; UI endpoints pass the default, the legacy importer passes False
     # clips
     def list_clips(self) -> list[Clip]; def get_clip(self, clip_id: str) -> Clip
     def create_clip(self, *, clip_id: str | None, collection_id: str, title: str, source_name: str,
@@ -642,14 +647,15 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, icon TEXT NOT NULL,
   playback_mode TEXT NOT NULL, ord TEXT NOT NULL DEFAULT '[]', processing_profile_id TEXT NOT NULL,
-  enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0);
+  enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0,
+  user_edited INTEGER NOT NULL DEFAULT 0);   -- set to 1 by any UI write (PATCH, order); import never sets it
 CREATE TABLE seasons (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, icon TEXT NOT NULL,
   start TEXT, "end" TEXT, priority INTEGER NOT NULL DEFAULT 0, collection_id TEXT NOT NULL REFERENCES collections(id),
   builtin INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE normalization_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, target_lufs REAL NOT NULL,
   true_peak REAL NOT NULL, lra REAL NOT NULL);
 CREATE TABLE processing_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, settings TEXT NOT NULL);
-CREATE TABLE assets (filename TEXT PRIMARY KEY, size INTEGER, status TEXT NOT NULL);
+CREATE TABLE assets (filename TEXT PRIMARY KEY, size INTEGER, sha256 TEXT, status TEXT NOT NULL);
 CREATE TABLE clips (id TEXT PRIMARY KEY, collection_id TEXT NOT NULL REFERENCES collections(id),
   title TEXT NOT NULL, source_name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, notes TEXT NOT NULL DEFAULT '',
   original TEXT, recipe TEXT NOT NULL, published_render_id TEXT, render_pending INTEGER NOT NULL DEFAULT 0,
@@ -875,7 +881,7 @@ class JobQueue:
     async def run_gc(self) -> GcResult                     # runs GarbageCollector.run in a thread
 ```
 
-Render identity: at enqueue the job freezes `recipe_hash` (Task 3 `recipe_hash`) and the processing-profile fingerprint (profile settings + referenced asset sha256s). On success, `publish_render` stores them; `render_pending` is cleared **only if** the clip's current recipe hash and current profile fingerprint still equal the job's frozen values — otherwise `render_pending` stays true and a new render is enqueued (an older job finishing never hides a newer edit).
+Render inputs are frozen **at job start** (queued jobs coalesce, so they always start from the latest state): the job resolves recipe, normalization targets, processing settings (validated), original path + sha256, and every referenced asset; hard-links the original and assets into `.work/<job_id>/inputs/` (immutable for the job even if the user replaces them meanwhile), computes each linked asset's sha256, and builds `inputs_fingerprint = sha256(canonical JSON {recipe, normalization targets, processing settings, original_sha256, asset_sha256s})`. FFmpeg reads only the linked inputs. The published render stores `recipe_hash` and `profile_fingerprint = inputs_fingerprint`. On success, `render_pending` is cleared **only if** recomputing `inputs_fingerprint` from the clip's *current* state (using stored sha256s: `original.sha256`, `assets.sha256`) equals the job's — otherwise `render_pending` stays true and a new render is enqueued (an older job finishing never hides a newer edit, including a source replacement).
 
 Propagation (`JobQueue.propagate(reason)` helpers, called by Task 8/9 endpoints; each sets `render_pending=True` via the repository — which bumps the catalog revision — and enqueues renders):
 - `on_processing_profile_changed(profile_id)` → clips in collections using that profile.
@@ -886,7 +892,7 @@ Propagation (`JobQueue.propagate(reason)` helpers, called by Task 8/9 endpoints;
 
 Render job: status `rendering` (or `processing` when no render yet); refuse with failed "needs source" when `needs_source`; resolve collection profile (validate), normalization override, intro/outro assets (missing asset → failed "asset <name> missing: upload it in Organize"); `store.check_space(store.estimate_render_bytes(...), settings.disk_reserve_bytes)`; `engine.render(plan)` into `store.staging_path(job.id, "out.mp4")`; `n = repo.next_render_n`; `store.publish_file`; `repo.publish_render(RenderRecord(...timing_source="measured"...))`; enqueue thumbs. Failure: `set_status(failed, error)` keeps the previous published render; staging removed. Preview job writes `.work/previews/<clip_id>.mp4` via staging + `os.replace`, sets `has_preview`. Hourly background task calls `run_gc()`; job loop never dies (catch `Exception`, error = last 400 chars). One worker, FIFO. Timeout per render = `max(300, 120 * minutes)` (Clips `timeout_seconds_per_minute`).
 
-- [ ] **Step 1: Failing tests** (real ffmpeg, small profile): stale job (recipe changed while rendering — simulate by changing the recipe from the progress callback) publishes but leaves `render_pending` true and enqueues another render; each propagation helper marks exactly the affected clips pending and enqueues them; upload-like flow (create clip with original from `make_video`, `enqueue_probe`) → status ready, render r1 published, file at the recorded path, thumbs present; `set_recipe` + `enqueue_render` → r2 published, r1 retired with file still present; failure (replace original with garbage) → failed, r2 still published; render coalescing; missing asset → failed with message; insufficient space (monkeypatch `free_bytes`) → failed "not enough free space"; preview sets `has_preview` and catalog revision unchanged; notifier debounce (copy SE test).
+- [ ] **Step 1: Failing tests** (real ffmpeg, small profile): stale job (recipe, processing settings, asset bytes or source replaced while rendering — simulate from the progress callback; one test each) publishes the render made from the frozen inputs but leaves `render_pending` true and enqueues another render; the asset replaced mid-job does not change the job's output (linked input); each propagation helper marks exactly the affected clips pending and enqueues them; upload-like flow (create clip with original from `make_video`, `enqueue_probe`) → status ready, render r1 published, file at the recorded path, thumbs present; `set_recipe` + `enqueue_render` → r2 published, r1 retired with file still present; failure (replace original with garbage) → failed, r2 still published; render coalescing; missing asset → failed with message; insufficient space (monkeypatch `free_bytes`) → failed "not enough free space"; preview sets `has_preview` and catalog revision unchanged; notifier debounce (copy SE test).
 - [ ] **Step 2–4:** FAIL → implement → PASS (+ pyright, ruff).
 - [ ] **Step 5: Commit** `feat(studio): add render job queue, previews, thumbnails and catalog notifier`.
 
@@ -934,10 +940,10 @@ Stage (refuse with `ConflictError` if a run is active; `InvalidError` if `worker
 
 Commit:
 1. Load stage; for each staged clip compare the re-fetched clip (`updated_at`, `metadata.output_fingerprint`, `metadata.source_fingerprint`) — any difference → skipped `changed_during_import`.
-2. Create/update in this order inside a single logical run (each clip in its own DB transaction): processing profiles (same ids; skip existing ids), assets (each referenced filename present in `assets_dir` → ready else row `missing`), collections (same ids; `playback_mode`, `processing_profile_id`; order NOT written yet), seasons from `manifest.seasons` (create or update by id; `regular` updates only `collection_id`), then clips: `store_original(link=True)` from staging; `create_clip(clip_id=<worker id>, title=Path(relative_source_path).stem, source_name=Path(relative_source_path).name, sort_key=relative_output_path.casefold() if relative_output_path else f"{collection}/{id}.mp4".casefold(), recipe=Recipe(lead_in=…, tail_out=… from Worker timing or settings defaults), needs_source=…, status="ready" if output accepted else "processing")`; accepted output → `store.publish_file(staged_out, clip_id, n=1)` + `repo.publish_render(... timing_source ...)`; output rejected but source ok → `jobs.enqueue_render`; clips already present (same id) are skipped `already_imported` (idempotent); a staged clip missing from the re-fetched list is skipped `missing_from_refetch`. After all clips: for each collection **created in this run** call `set_collection_order(ordered_clip_ids)`; existing collections keep their (possibly edited) order. Report `catalog_revision` = revision after the run.
+2. Create/update in this order inside a single logical run (each clip in its own DB transaction): processing profiles (same ids; skip existing ids), assets (each referenced filename present in `assets_dir` → ready else row `missing`), collections (same ids; `playback_mode`, `processing_profile_id`; order NOT written yet), seasons from `manifest.seasons` (create or update by id; `regular` updates only `collection_id`), then clips: `store_original(link=True)` from staging; `create_clip(clip_id=<worker id>, title=Path(relative_source_path).stem, source_name=Path(relative_source_path).name, sort_key=relative_output_path.casefold() if relative_output_path else f"{collection}/{id}.mp4".casefold(), recipe=Recipe(lead_in=…, tail_out=… from Worker timing or settings defaults), needs_source=…, status="ready" if output accepted else "processing")`; accepted output → `store.publish_file(staged_out, clip_id, n=1)` + `repo.publish_render(... timing_source ...)`; output rejected but source ok → `jobs.enqueue_render`; clips already present (same id) are skipped `already_imported` (idempotent); a staged clip missing from the re-fetched list is skipped `missing_from_refetch`. After all clips: for each manifest collection whose DB row has `user_edited == 0` (newly created **or** untouched seed such as `regular`) apply `playback_mode`, `processing_profile_id` and `set_collection_order(ordered_clip_ids, user_edit=False)`; collections the user edited in the UI keep their settings and order on reruns. Report `catalog_revision` = revision after the run.
 3. Remove `.work/import/<run_id>`; save and return `LegacyReport`.
 
-- [ ] **Step 1: Failing tests** (build a fake Worker tree under `tmp_path/media/cinema-collections/{source,compiled}/regular/…` with `make_video` outputs; compute real fingerprints; use the production example timing scaled to the fixture duration): happy path imports with same ids, inode shared with Worker files, timing equals manifest, `timing_source == "legacy_worker"`; fingerprint mismatch → no render, `queued_for_render`; source mismatch → `needs_source`; all-timing-absent → `legacy_full_file`; partial timing → rejected output; path escape (`../../etc/passwd`) → rejected `unsafe_path`; changed `updated_at` at commit → skipped; staged clip absent from refetch → `missing_from_refetch`; custom order applied after clips exist and preserved on a rerun after the user edits it; roots outside media dir or inside `cinema-studio/` → InvalidError; second run → `already_imported`; busy Worker → InvalidError; run older than 1 h discarded; Worker later `os.replace`s its compiled file → our render bytes unchanged.
+- [ ] **Step 1: Failing tests** (build a fake Worker tree under `tmp_path/media/cinema-collections/{source,compiled}/regular/…` with `make_video` outputs; compute real fingerprints; use the production example timing scaled to the fixture duration): happy path imports with same ids, inode shared with Worker files, timing equals manifest, `timing_source == "legacy_worker"`; fingerprint mismatch → no render, `queued_for_render`; source mismatch → `needs_source`; all-timing-absent → `legacy_full_file`; partial timing → rejected output; path escape (`../../etc/passwd`) → rejected `unsafe_path`; changed `updated_at` at commit → skipped; staged clip absent from refetch → `missing_from_refetch`; custom order imported into the seeded `regular` collection; custom order applied after clips exist and preserved on a rerun after the user edits it (`user_edited`); roots outside media dir or inside `cinema-studio/` → InvalidError; second run → `already_imported`; busy Worker → InvalidError; run older than 1 h discarded; Worker later `os.replace`s its compiled file → our render bytes unchanged.
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(studio): add staged, fingerprint-verified legacy import`.
 
@@ -947,7 +953,7 @@ Commit:
 
 **Files:** Create `api_ui_organize.py`; Modify `app.py`; Test `tests/studio/test_api_ui_organize.py`.
 
-Endpoints exactly as the UI API rows `state`, `token*`, `settings`, `collections*`, `seasons*`, `normalization-profiles*`, `processing-profiles*`, `assets*`, `gc/run`. Prefix `/api/ui`, `require_ingress`. `state.consumers`: union of `repo.list_consumers_seen()` and consumer files, with `file_present`, `held_revision`, pin count. `state.gc` from the last `GcResult` (kept in `app.state`). `normalization-profiles/{id}/apply` with `{clip_ids}` or `{collection_id}` sets `recipe.profile_id` and enqueues renders. `PUT settings` validates `test_targets` (`media_player.` only, unique ids, not in `protected_entities`). Asset upload: multipart, extension in `.mp4 .mov .mkv .webm .m4v`, saved atomically to `assets_dir/<safe name>`, probed (invalid → 422), status ready, then `jobs.on_asset_changed(name)`; asset delete 409 when referenced by any processing profile (`intro_reference`/`outro_reference`). Processing profile PATCH → `jobs.on_processing_profile_changed`; normalization profile PATCH with changed targets → `jobs.on_normalization_profile_changed`; collection PATCH changing `processing_profile_id` → `jobs.on_collection_profile_changed`. Responses report `affected_clip_ids`.
+Endpoints exactly as the UI API rows `state`, `token*`, `settings`, `collections*`, `seasons*`, `normalization-profiles*`, `processing-profiles*`, `assets*`, `gc/run`. Prefix `/api/ui`, `require_ingress`. `state.consumers`: union of `repo.list_consumers_seen()` and consumer files, with `file_present`, `held_revision`, pin count. `state.gc` from the last `GcResult` (kept in `app.state`). `normalization-profiles/{id}/apply` with `{clip_ids}` or `{collection_id}` sets `recipe.profile_id` and enqueues renders. `PUT settings` validates `test_targets` (`media_player.` only, unique ids, not in `protected_entities`). Asset upload: multipart, extension in `.mp4 .mov .mkv .webm .m4v`, saved atomically to `assets_dir/<safe name>`, probed (invalid → 422), status ready, then `jobs.on_asset_changed(name)`; asset delete 409 when referenced by any processing profile (`intro_reference`/`outro_reference`). Processing profile PATCH → `jobs.on_processing_profile_changed`; normalization profile PATCH with changed targets → `jobs.on_normalization_profile_changed`; collection PATCH changing `processing_profile_id` → `jobs.on_collection_profile_changed`. Response shapes exactly as the UI API table (`Affected<…>`).
 
 - [ ] **Step 1: Failing tests** — CRUD round-trips; conflicts; profile/asset/collection-profile edits mark exactly the affected clips pending and queue renders; `seasons/resolve` returns `collection_id`; processing profile invalid settings → 422; asset upload/probe/delete conflict; settings rejects `remote.x` and protected entity; `gc/run` returns result; state never leaks the full token.
 - [ ] **Step 2–4:** FAIL → implement → PASS.
@@ -964,7 +970,7 @@ Rules:
 - `PUT recipe`: `Recipe.validate_for(original)` (trim within duration ±0.05, `trim_start < trim_end`, crop inside source dims and ≥ 64×64, fades ≥ 0 and sum ≤ trimmed length, lead/tail 0…10, gain −24…24, `profile_id` exists or null) → `set_recipe` → `enqueue_render`.
 - Streams: `FileResponse` with Range (`video/mp4`); `render` serves the published render; 404 when missing.
 - Thumbs: `poster.jpg` from `thumbs/<clip_id>/r<n>/` of the published render (fallback `thumbs/<clip_id>/original/poster.jpg`); `filmstrip.json` and `filmstrip/{index}.jpg` from `thumbs/<clip_id>/original/` (index int 0…count-1).
-- Source repair: `POST clips/{id}/source {upload_id}` — upload session must be complete (all bytes); file probed (must have video); stored with `store_original` (replacing the old original dir atomically: write new dir, swap, delete old); `set_original` with new sha256; `needs_source=False`; `enqueue_thumbs`; `enqueue_render`. Works for any clip (also replaces a good source).
+- Asset upload records `sha256`. Source repair: `POST clips/{id}/source {upload_id}` — upload session must be complete (all bytes); file probed (must have video); stored with `store_original` (replacing the old original dir atomically: write new dir, swap, delete old); `set_original` with new sha256; `needs_source=False`; `enqueue_thumbs`; `enqueue_render`. Works for any clip (also replaces a good source).
 - Test on device: target from `settings.test_targets` (404 unknown); re-check entity starts with `media_player.` and is not in `protected_entities` (403); source `render` → media-source URI of the published render; `preview` → copy preview to `renders/_test/<clip_id>-<token_hex(4)>.mp4` (deleted after 1 h by the periodic task; `_test` is excluded from `scan_renders`) and use its media-source URI; `supervisor.call_service("media_player", "play_media", {"entity_id", "media_content_id", "media_content_type": "video"})`; supervisor unavailable → 503.
 - Delete clip: `repo.delete_clip` (render retired, GC removes later); delete original dir and thumbs immediately.
 
@@ -1255,7 +1261,7 @@ All UI work under `app/ui/`, built into `app/src/cinema_studio/static/ui` by the
 
 Changes:
 - `style.css`: `--color-accent: #f59e0b; --color-accent-soft: #f59e0b33; --color-accent-ink: #111111;` (rest as SE).
-- `api/types.ts`: exactly the Shared API Reference types. `api/client.ts`: `ui = { state, token, rotateToken, settings, collections{list,create,update,remove,order}, seasons{list,create,update,remove,resolve}, normProfiles{list,create,update,remove,apply}, procProfiles{list,create,update,remove}, assets{list,upload(file),remove}, clips{list,get,update,putRecipe,preview,rerender,remove,bulk,test,replaceSource}, uploads{create,chunk,complete}, jobs, gcRun }`; `mediaUrl(id, kind: "original"|"preview"|"render", bust?)` → `api/ui/clips/${id}/${kind}`; `posterUrl(id, bust?)`, `filmstripUrl(id, index, bust?)`.
+- `api/types.ts`: exactly the Shared API Reference types. `api/client.ts`: `ui = { state, token, rotateToken, settings, collections{list,create,update,remove,order}, seasons{list,create,update,remove,resolve}, normProfiles{list,create,update,remove,apply}, procProfiles{list,create,update,remove}, assets{list,upload(file),remove}, clips{list,get,update,putRecipe,preview,rerender,remove,bulk,test,replaceSource}, uploads{create,chunk,complete}, jobs, gcRun }`; (return types follow the UI API table exactly, e.g. `collections.update` → `Affected<"collection", Collection>`, `procProfiles.update` → `Affected<"profile", ProcessingProfile>`, `normProfiles.update` → `Affected<"profile", NormalizationProfile>`, `assets.upload` → `Affected<"asset", Asset>`); `mediaUrl(id, kind: "original"|"preview"|"render", bust?)` → `api/ui/clips/${id}/${kind}`; `posterUrl(id, bust?)`, `filmstripUrl(id, index, bust?)`.
 - `lib/format.ts`: keep SE formatters; `formatDuration(154.133)` → `"2:34.1"`; add `formatTimecode(seconds)` → `"00:02:34.133"`.
 - `lib/recipe.ts`: `defaultRecipe(settings)`, `validateRecipe(r, original)` returning i18n keys for every server rule in Task 9, `recipesEqual`, `trimmedLength(r, duration)`.
 - `lib/filters.ts`: `ClipFilter = {collectionId, seasonId, query, status}`; `filterClips` (accent-insensitive title/source_name), `loudnessSpread(clips)` over `render.integrated_lufs`.
