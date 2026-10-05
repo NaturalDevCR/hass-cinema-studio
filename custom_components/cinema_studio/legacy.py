@@ -67,8 +67,10 @@ class LegacyImport:
                     payload = cast(dict[str, Any], await get(f"/{path}?page={page}&page_size=100"))
                     items = cast(list[dict[str, Any]], payload["items"])
                     result.extend(items)
-                    if len(result) >= payload["total"] or not items:
+                    if len(result) >= payload["total"]:
                         return result
+                    if not items:
+                        raise StudioConnectionError("Legacy Worker returned incomplete pagination")
                     page += 1
 
             collections = await records("collections")
@@ -154,8 +156,6 @@ class LegacyImport:
                 value = entry.options.get(key, default)
                 if value != default:
                     options[key] = value
-            if options != dict(self.manager.entry.options):
-                self.hass.config_entries.async_update_entry(self.manager.entry, options=options)
             data = await Store[dict[str, Any]](
                 self.hass, 1, f"{LEGACY_DOMAIN}.{entry.entry_id}.playback_history"
             ).async_load()
@@ -183,6 +183,9 @@ class LegacyImport:
                 title="Cinema Studio legacy import",
                 notification_id="cinema_studio_legacy_import",
             )
+            # Updating options schedules a reload; persisted state must be ready first.
+            if options != dict(self.manager.entry.options):
+                self.hass.config_entries.async_update_entry(self.manager.entry, options=options)
             return result
 
     def _seasons(self, collections: set[str]) -> list[dict[str, Any]]:

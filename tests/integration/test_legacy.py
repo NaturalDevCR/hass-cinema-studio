@@ -279,3 +279,86 @@ async def test_catalog_adoption_wait(hass, migration, aioclient_mock, catalog_pa
             report = await migration.legacy.async_run(False)
             assert report["catalog_revision"] == migration.catalog_revision == 5
             assert calls == 2
+
+
+async def test_import_persists_before_options_reload(hass, aioclient_mock, catalog_payload):
+    from .studio_support import mock_studio, new_entry, setup
+
+    mock_studio(aioclient_mock, catalog_payload)
+    entry = new_entry(hass)
+    await setup(hass, entry)
+    legacy_entry = worker(hass, aioclient_mock)
+    hass.config_entries.async_update_entry(
+        legacy_entry, options={"history_reset_mode": "daily", "history_reset_time": "03:00"}
+    )
+    record = {
+        "period_start": "2026-10-05",
+        "round_number": 7,
+        "played_clip_ids": ["clip-a", "unknown"],
+        "last_selected_clip_id": "clip-a",
+        "last_reset_at": "2026-10-05T03:00:00Z",
+        "reset_pending": False,
+    }
+    await Store(hass, 1, f"cinema_collections.{legacy_entry.entry_id}.playback_history").async_save(
+        {"collections": {"regular": record}}
+    )
+    old_manager = entry.runtime_data.manager
+    old_options = dict(entry.options)
+    save = old_manager._store.async_save
+
+    async def save_before_reload(data):
+        # Assert at the actual persistence boundary, independent of scheduler timing.
+        assert dict(entry.options) == old_options
+        await save(data)
+
+    with patch.object(old_manager._store, "async_save", side_effect=save_before_reload):
+        await hass.services.async_call(
+            "cinema_studio", "import_legacy", {"history_only": True}, blocking=True
+        )
+        await hass.async_block_till_done(wait_background_tasks=True)
+    replacement = entry.runtime_data.manager
+    assert replacement is not old_manager
+    assert entry.options["history_reset_mode"] == "daily"
+    assert entry.options["history_reset_time"] == "03:00"
+    assert replacement._history.to_dict() == {
+        "collections": {"regular": {**record, "played_clip_ids": ["clip-a"]}}
+    }
+    assert replacement._state()["activation"] == {
+        "last_effective_season": "regular",
+        "last_effective_collection": "regular",
+    }
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_premature_empty_page_rejected(hass, migration, aioclient_mock, caplog):
+    from custom_components.cinema_studio.api import StudioConnectionError
+
+    entry = MockConfigEntry(
+        domain="cinema_collections",
+        data={"endpoint": "http://worker:8099", "token": "secret-legacy"},
+    )
+    entry.add_to_hass(hass)
+    aioclient_mock.get(
+        "http://worker:8099/api/v1/collections?page=1&page_size=100",
+        json={"items": [{"id": "regular"}], "total": 2},
+    )
+    aioclient_mock.get(
+        "http://worker:8099/api/v1/collections?page=2&page_size=100",
+        json={"items": [], "total": 2},
+    )
+    before = migration._state()
+    with (
+        patch.object(migration._client, "legacy_stage", AsyncMock()) as stage,
+        patch.object(migration._client, "legacy_commit", AsyncMock()) as commit,
+        patch(
+            "custom_components.cinema_studio.legacy.persistent_notification.async_create"
+        ) as notify,
+        pytest.raises(StudioConnectionError, match="incomplete") as error,
+    ):
+        await migration.legacy.async_run(True)
+    assert "secret-legacy" not in str(error.value) + caplog.text
+    assert migration._state() == before
+    assert await migration._store.async_load() is None
+    stage.assert_not_awaited()
+    commit.assert_not_awaited()
+    notify.assert_not_called()
