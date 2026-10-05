@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Cinema Studio",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "API token"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Cinema Studio",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "API token"
+        }
+      },
+      "hassio_confirm": {
+        "title": "Cinema Studio discovered",
+        "description": "Connect to {addon}?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect",
+      "invalid_auth": "Invalid API token",
+      "invalid_host": "Enter a host"
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Cinema Studio instance is allowed",
+      "already_configured": "Already configured",
+      "invalid_discovery_info": "Invalid discovery information",
+      "invalid_auth": "Invalid API token",
+      "cannot_connect": "Unable to verify Cinema Studio",
+      "reauth_successful": "Credentials updated",
+      "reconfigure_successful": "Connection updated",
+      "unique_id_mismatch": "This is a different Cinema Studio instance"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Cinema Studio options",
+        "data": {
+          "season_entity": "Season entity",
+          "scan_interval": "Scan interval",
+          "history_reset_mode": "History reset mode",
+          "history_reset_time": "History reset time"
+        }
+      }
+    }
+  },
+  "issues": {
+    "invalid_catalog": {
+      "title": "Cinema Studio returned an invalid catalog",
+      "description": "The latest catalog was rejected: {error}. The last valid catalog remains active."
+    }
+  }
+}
