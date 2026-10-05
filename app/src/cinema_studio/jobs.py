@@ -48,7 +48,7 @@ from .probe import probe
 from .profiles import ProcessingProfile, resolve_profile_assets
 from .render import RenderEngine, RenderOutput
 from .repository import Repository
-from .storage import MediaStore
+from .storage import MediaStore, validate_contained_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -377,12 +377,16 @@ class JobQueue:
     def _original_path(self, clip: Clip) -> Path:
         directory = self._paths.originals_dir / clip.id
         if clip.original is not None:
-            return directory / clip.original.filename
+            path = directory / clip.original.filename
+            validate_contained_path(path, self._paths.originals_dir)
+            return path
+        validate_contained_path(directory, self._paths.originals_dir)
         files = (
             [path for path in directory.iterdir() if path.is_file()] if directory.is_dir() else []
         )
         if len(files) != 1:
             raise media.MediaError("Expected exactly one original video file")
+        validate_contained_path(files[0], self._paths.originals_dir)
         return files[0]
 
     def _preview_path(self, clip_id: str) -> Path:

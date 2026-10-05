@@ -983,6 +983,24 @@ class Repository:
             )
             return _get_clip(tx.conn, clip_id)
 
+    def replace_original(self, clip_id: str, original: OriginalInfo) -> Clip:
+        """Publish a placed version and its source/render flags in one transaction."""
+        with self._write() as tx:
+            clip = _get_clip(tx.conn, clip_id)
+            clip.recipe.validate_for(original)
+            status = clip.status
+            error = clip.error
+            if status == "failed":
+                status = "ready" if clip.render is not None else "processing"
+                error = None
+            tx.conn.execute(
+                "UPDATE clips SET original = ?, needs_source = 0, render_pending = 1, "
+                "has_preview = 0, status = ?, error = ?, updated_at = ? WHERE id = ?",
+                (original.model_dump_json(), status, error, utcnow_iso(), clip_id),
+            )
+            tx.bump = True
+            return _get_clip(tx.conn, clip_id)
+
     def set_status(self, clip_id: str, status: ClipStatus, error: str | None = None) -> Clip:
         with self._write() as tx:
             _get_row(tx.conn, "clips", "Clip", clip_id)

@@ -132,9 +132,13 @@ class MediaStore:
     def relative_path(self, path: Path) -> str:
         return path.relative_to(self.paths.media_dir).as_posix()
 
-    def store_original(self, src: Path, clip_id: str, filename: str, *, link: bool) -> Path:
+    def store_original(
+        self, src: Path, clip_id: str, filename: str, *, link: bool, version: str | None = None
+    ) -> Path:
         name = _component(filename.replace("\\", "/").rsplit("/", 1)[-1])
         destination = self.paths.originals_dir / _component(clip_id) / name
+        if version is not None:
+            destination = destination.parent / _component(version) / name
         self._validate_write(destination, self.paths.originals_dir)
         self._ensure_directory(destination.parent)
         if link:
@@ -146,6 +150,11 @@ class MediaStore:
                 shutil.copy2(src, destination)
         else:
             shutil.move(src, destination)
+        if version is not None:
+            with destination.open("rb") as file:
+                os.fsync(file.fileno())
+            _sync_directory(destination.parent)
+            _sync_directory(destination.parent.parent)
         return destination
 
     def clean_work(self) -> None:

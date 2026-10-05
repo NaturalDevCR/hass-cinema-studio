@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
-import os
 import re
 import secrets
 import shutil
@@ -42,6 +42,8 @@ from .uploads import (
     UploadTooLargeError,
     safe_filename,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ui")
 
@@ -233,9 +235,18 @@ async def rerender(clip_id: str, request: Request) -> dict[str, Job]:
     return {"job": _jobs(request).enqueue_render(clip_id)}
 
 
+def _cleanup_directory(directory: Path) -> None:
+    try:
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _LOGGER.warning("Could not remove %s: %s", directory, exc)
+
+
 def _remove_clip_files(paths: Paths, clip_id: str) -> None:
     for directory in (paths.originals_dir / clip_id, paths.thumbs_dir / clip_id):
-        shutil.rmtree(directory, ignore_errors=True)
+        _cleanup_directory(directory)
     _preview_path(paths, clip_id).unlink(missing_ok=True)
 
 
@@ -255,12 +266,15 @@ def _original_file(paths: Paths, clip: Clip) -> Path:
     directory = paths.originals_dir / clip.id
     if clip.original is not None:
         candidate = directory / clip.original.filename
+        validate_contained_path(candidate, paths.originals_dir)
         if candidate.is_file():
             return candidate
         raise NotFoundError("Original video is missing.")
+    validate_contained_path(directory, paths.originals_dir)
     files = [file for file in directory.iterdir() if file.is_file()] if directory.is_dir() else []
     if len(files) != 1:
         raise NotFoundError("Original video is missing.")
+    validate_contained_path(files[0], paths.originals_dir)
     return files[0]
 
 
@@ -268,6 +282,7 @@ def _render_file(paths: Paths, clip: Clip) -> Path:
     if clip.render is None:
         raise NotFoundError("Rendered video is missing.")
     file = paths.media_dir / clip.render.relative_path
+    validate_contained_path(file, paths.media_dir)
     if not file.is_file():
         raise NotFoundError("Rendered video is missing.")
     return file
@@ -277,7 +292,11 @@ def _render_file(paths: Paths, clip: Clip) -> Path:
 async def get_original(clip_id: str, request: Request) -> FileResponse:
     clip = _repo(request).get_clip(clip_id)
     file = _original_file(_paths(request), clip)
-    media_type = mimetypes.guess_type(file.name)[0] or "video/mp4"
+    media_type = (
+        "video/mp4"
+        if file.suffix.lower() == ".mp4"
+        else (mimetypes.guess_type(file.name)[0] or "video/mp4")
+    )
     return FileResponse(file, media_type=media_type, headers=_NO_CACHE)
 
 
@@ -285,6 +304,7 @@ async def get_original(clip_id: str, request: Request) -> FileResponse:
 async def get_preview(clip_id: str, request: Request) -> FileResponse:
     _repo(request).get_clip(clip_id)
     file = _preview_path(_paths(request), clip_id)
+    validate_contained_path(file, _paths(request).work_dir)
     if not file.is_file():
         raise NotFoundError("Preview video is missing.")
     return FileResponse(file, media_type="video/mp4", headers=_NO_CACHE)
@@ -304,12 +324,14 @@ async def get_poster(clip_id: str, request: Request) -> FileResponse:
     if clip.render is not None:
         candidates.insert(0, root / f"r{clip.render.n}" / "poster.jpg")
     for candidate in candidates:
+        validate_contained_path(candidate, _paths(request).thumbs_dir)
         if candidate.is_file():
             return FileResponse(candidate, media_type="image/jpeg", headers=_NO_CACHE)
     raise NotFoundError("Poster is missing.")
 
 
-def _filmstrip_count(directory: Path) -> int:
+def _filmstrip_count(directory: Path, root: Path) -> int:
+    validate_contained_path(directory / "filmstrip.json", root)
     try:
         metadata: object = json.loads((directory / "filmstrip.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -324,6 +346,7 @@ def _filmstrip_count(directory: Path) -> int:
 async def get_filmstrip(clip_id: str, request: Request) -> FileResponse:
     _repo(request).get_clip(clip_id)
     file = _paths(request).thumbs_dir / clip_id / "original" / "filmstrip.json"
+    validate_contained_path(file, _paths(request).thumbs_dir)
     if not file.is_file():
         raise NotFoundError("Filmstrip is missing.")
     return FileResponse(file, media_type="application/json", headers=_NO_CACHE)
@@ -333,9 +356,10 @@ async def get_filmstrip(clip_id: str, request: Request) -> FileResponse:
 async def get_filmstrip_frame(clip_id: str, index: int, request: Request) -> FileResponse:
     _repo(request).get_clip(clip_id)
     directory = _paths(request).thumbs_dir / clip_id / "original"
-    if not 0 <= index < _filmstrip_count(directory):
+    if not 0 <= index < _filmstrip_count(directory, _paths(request).thumbs_dir):
         raise NotFoundError("Filmstrip frame does not exist.")
     file = directory / f"{index:04d}.jpg"
+    validate_contained_path(file, _paths(request).thumbs_dir)
     if not file.is_file():
         raise NotFoundError("Filmstrip frame does not exist.")
     return FileResponse(file, media_type="image/jpeg", headers=_NO_CACHE)
@@ -346,12 +370,15 @@ async def get_filmstrip_frame(clip_id: str, index: int, request: Request) -> Fil
 
 def _copy_preview_for_test(paths: Paths, source: Path, clip_id: str) -> str:
     """Copy a preview under ``renders/_test`` (swept after an hour); returns its media path."""
+    validate_contained_path(source, paths.work_dir)
     validate_contained_path(paths.renders_dir, paths.media_dir)
     directory = paths.renders_dir / TEST_RENDER_DIR
     directory.mkdir(mode=0o755, parents=True, exist_ok=True)
     validate_contained_path(directory, paths.renders_dir)
     target = directory / f"{clip_id}-{secrets.token_hex(4)}.mp4"
-    shutil.copyfile(source, target)
+    validate_contained_path(target, paths.renders_dir)
+    with target.open("xb") as destination, source.open("rb") as origin:
+        shutil.copyfileobj(origin, destination)
     return target.relative_to(paths.media_dir).as_posix()
 
 
@@ -371,6 +398,7 @@ async def test_on_device(clip_id: str, data: TestRequest, request: Request) -> d
     paths = _paths(request)
     if data.source == "preview":
         source = _preview_path(paths, clip_id)
+        validate_contained_path(source, paths.work_dir)
         if not source.is_file():
             raise NotFoundError("Preview video is missing.")
     else:
@@ -529,25 +557,49 @@ async def _probe_original(staged: Path, max_duration_s: int) -> OriginalInfo:
     )
 
 
-def _swap_original(paths: Paths, store: MediaStore, staged: Path, clip_id: str) -> None:
-    """Write the new original beside the old directory, swap them, then delete the old one."""
-    token = secrets.token_hex(4)
-    fresh_id, old_id = f"{clip_id}.new-{token}", f"{clip_id}.old-{token}"
-    fresh = paths.originals_dir / fresh_id
-    final = paths.originals_dir / clip_id
-    retired = paths.originals_dir / old_id
+async def _replace_source_settled(
+    request: Request, clip: Clip, staged: Path, original: OriginalInfo
+) -> Clip:
+    paths = _paths(request)
+    version = "v" + uuid.uuid4().hex
+    directory = paths.originals_dir / clip.id / version
+    committed = False
     try:
-        store.store_original(staged, fresh_id, staged.name, link=False)
-        validate_contained_path(final, paths.originals_dir)
-        if final.exists():
-            os.replace(final, retired)
-        os.replace(fresh, final)
-    except BaseException:
-        shutil.rmtree(fresh, ignore_errors=True)
-        if retired.exists() and not final.exists():
-            os.replace(retired, final)  # put the old original back
-        raise
-    shutil.rmtree(retired, ignore_errors=True)
+        placed = await asyncio.to_thread(
+            _store(request).store_original,
+            staged,
+            clip.id,
+            staged.name,
+            link=False,
+            version=version,
+        )
+        original = original.model_copy(
+            update={"filename": placed.relative_to(paths.originals_dir / clip.id).as_posix()}
+        )
+        _repo(request).replace_original(clip.id, original)
+        committed = True
+        jobs = _jobs(request)
+        jobs.enqueue_thumbs(clip.id)
+        jobs.enqueue_render(clip.id)
+        try:
+            _preview_path(paths, clip.id).unlink(missing_ok=True)
+        except OSError as exc:
+            _LOGGER.warning("Could not remove preview for %s: %s", clip.id, exc)
+        if clip.original is not None:
+            old = paths.originals_dir / clip.id / clip.original.filename
+            try:
+                validate_contained_path(old, paths.originals_dir)
+                if old.parent != paths.originals_dir / clip.id:
+                    _cleanup_directory(old.parent)
+                else:
+                    old.unlink(missing_ok=True)
+            except (OSError, InvalidError) as exc:
+                _LOGGER.warning("Could not remove old original %s: %s", old, exc)
+        return _repo(request).get_clip(clip.id)
+    finally:
+        if not committed:
+            _cleanup_directory(directory)
+        _cleanup_directory(staged.parent)
 
 
 @router.post("/clips/{clip_id}/source")
@@ -556,27 +608,25 @@ async def replace_source(clip_id: str, data: SourceReplace, request: Request) ->
     clip = repo.get_clip(clip_id)
     uploads = _uploads(request)
     filename = await asyncio.to_thread(uploads.ready_filename, data.upload_id)
-    paths = _paths(request)
-    staged = await asyncio.to_thread(_stage_upload, request, data.upload_id, filename)
+    placement = asyncio.ensure_future(
+        asyncio.to_thread(_stage_upload, request, data.upload_id, filename)
+    )
+    try:
+        staged = await asyncio.shield(placement)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            staged = await placement
+            _cleanup_directory(staged.parent)
+        raise
     try:
         original = await _probe_original(staged, repo.get_settings().max_duration_s)
         clip.recipe.validate_for(original)
-        await _settled(
-            asyncio.ensure_future(
-                asyncio.to_thread(_swap_original, paths, _store(request), staged, clip_id)
-            )
-        )
-    finally:
-        shutil.rmtree(staged.parent, ignore_errors=True)
-    repo.set_original(clip_id, original)
-    repo.set_flags(clip_id, needs_source=False, render_pending=True, has_preview=False)
-    _preview_path(paths, clip_id).unlink(missing_ok=True)
-    if clip.status == "failed":
-        repo.set_status(clip_id, "ready" if clip.render is not None else "processing")
-    jobs = _jobs(request)
-    jobs.enqueue_thumbs(clip_id)
-    jobs.enqueue_render(clip_id)
-    return repo.get_clip(clip_id)
+    except BaseException:
+        _cleanup_directory(staged.parent)
+        raise
+    return await _settled(
+        asyncio.ensure_future(_replace_source_settled(request, clip, staged, original))
+    )
 
 
 # --- jobs ------------------------------------------------------------------------------------

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import shutil
+import sqlite3
+import threading
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -760,10 +763,10 @@ async def test_source_repair_restores_a_needs_source_clip(
     assert clip["status"] == "processing" and clip["error"] is None
     assert clip["original"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert (
-        clip["original"]["filename"] == "Fixed.mp4"
+        Path(clip["original"]["filename"]).name == "Fixed.mp4"
         and clip["original"]["size"] == source.stat().st_size
     )
-    assert [p.name for p in (paths.originals_dir / clip_id).iterdir()] == ["Fixed.mp4"]
+    assert (paths.originals_dir / clip_id / clip["original"]["filename"]).is_file()
     assert sorted(p.name for p in paths.originals_dir.iterdir()) == [clip_id]
     assert not list(paths.work_dir.glob("upload-*")) and not list(paths.uploads_dir.iterdir())
 
@@ -788,7 +791,7 @@ async def test_source_repair_replaces_a_good_source(
     assert updated["original"]["sha256"] != clip["original"]["sha256"]
     assert updated["original"]["width"] == 192 and updated["status"] == "ready"
     assert updated["render"]["id"] == clip["render"]["id"]  # old render stays until the new one
-    assert [p.name for p in (paths.originals_dir / clip["id"]).iterdir()] == ["other.mp4"]
+    assert (paths.originals_dir / clip["id"] / updated["original"]["filename"]).is_file()
     await app.state.jobs.wait_idle()
     final = repo.get_clip(clip["id"])
     assert final.render is not None and final.render.id != clip["render"]["id"]
@@ -852,7 +855,7 @@ async def test_source_swap_failure_leaves_the_old_original(
     def explode(*args: object, **kwargs: object) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(api_ui_clips.os, "replace", explode)
+    monkeypatch.setattr(repo, "replace_original", explode)
     with pytest.raises(OSError, match="disk full"):
         await live.post(url, json={"upload_id": upload_id})
     assert [p.name for p in (paths.originals_dir / clip["id"]).iterdir()] == [
@@ -913,3 +916,174 @@ async def test_finished_jobs_are_newest_first(live: Client, app: FastAPI, make_v
     kinds = [j["kind"] for j in (await live.get("/api/ui/jobs")).json()]
     assert kinds[0] == "thumbs" and kinds[-1] == "probe"
     assert set(kinds) == {"probe", "render", "thumbs"}
+
+
+@pytest.mark.parametrize(
+    "kind", ["original", "preview", "render", "poster.jpg", "filmstrip.json", "filmstrip/0.jpg"]
+)
+async def test_media_symlinks_rejected(
+    idle: Client, repo: Repository, paths: Paths, tmp_path: Path, kind: str
+):
+    clip_id = fake_clip(repo, paths)
+    clip = repo.get_clip(clip_id)
+    assert clip.render is not None
+    root = paths.thumbs_dir / clip_id / "original"
+    root.mkdir(parents=True)
+    (root / "filmstrip.json").write_text('{"count":1}')
+    candidates = {
+        "original": paths.originals_dir / clip_id / "movie.mp4",
+        "preview": paths.work_dir / "previews" / f"{clip_id}.mp4",
+        "render": paths.media_dir / clip.render.relative_path,
+        "poster.jpg": root / "poster.jpg",
+        "filmstrip.json": root / "filmstrip.json",
+        "filmstrip/0.jpg": root / "0000.jpg",
+    }
+    outside = tmp_path / "secret"
+    outside.write_bytes(b"secret")
+    target = candidates[kind]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    target.symlink_to(outside)
+    assert (await idle.get(f"/api/ui/clips/{clip_id}/{kind}")).status_code == 422
+
+
+async def test_delete_cleanup_failure_logged(
+    idle: Client,
+    repo: Repository,
+    paths: Paths,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    clip_id = fake_clip(repo, paths)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("cleanup denied")
+
+    monkeypatch.setattr(api_ui_clips.shutil, "rmtree", fail)
+    assert (await idle.delete(f"/api/ui/clips/{clip_id}")).status_code == 204
+    assert "cleanup denied" in caplog.text
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("versioned", [False, True])
+async def test_replacement_placement_keeps_old_readable_and_settles(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    paths: Paths,
+    make_video: Video,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: bool,
+    versioned: bool,
+):
+    clip_id = fake_clip(repo, paths)
+    old = repo.get_clip(clip_id)
+    assert old.original is not None
+    if versioned:
+        repo.set_original(
+            clip_id, old.original.model_copy(update={"filename": "v" + "a" * 32 + "/movie.mp4"})
+        )
+        old = repo.get_clip(clip_id)
+        assert old.original is not None
+    original_path = paths.originals_dir / clip_id / old.original.filename
+    original_path.parent.mkdir(parents=True, exist_ok=True)
+    original_path.write_bytes(b"old source")
+    monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
+    monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
+    upload_id = await start_upload(idle, make_video(name="replacement.mp4", seconds=2))
+    placed = threading.Event()
+    release = threading.Event()
+    store = app.state.store
+    real_store = store.store_original
+
+    def pause(*args: Any, **kwargs: Any) -> Path:
+        result: Path = real_store(*args, **kwargs)
+        placed.set()
+        assert release.wait(10)
+        return result
+
+    monkeypatch.setattr(store, "store_original", pause)
+    task = asyncio.create_task(
+        idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": upload_id})
+    )
+    try:
+        assert await asyncio.to_thread(placed.wait, 10)
+        assert repo.get_clip(clip_id).original == old.original
+        response = await idle.get(f"/api/ui/clips/{clip_id}/original")
+        assert response.content == b"old source"
+        if cancel:
+            task.cancel()
+        release.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            assert (await task).status_code == 200
+        current = repo.get_clip(clip_id)
+        assert current.original is not None
+        assert re.fullmatch(r"v[0-9a-f]{32}/replacement.mp4", current.original.filename)
+        assert (paths.originals_dir / clip_id / current.original.filename).is_file()
+        assert not original_path.exists()
+        if versioned:
+            assert not original_path.parent.exists()
+        assert current.render_pending and not current.needs_source
+        assert {job.kind for job in app.state.jobs.list_jobs()} == {"thumbs", "render"}
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+@pytest.mark.parametrize("source", ["preview", "render"])
+async def test_device_symlink_rejected(
+    idle: Client,
+    repo: Repository,
+    paths: Paths,
+    device: FakeSupervisor,
+    tmp_path: Path,
+    source: str,
+):
+    clip_id = fake_clip(repo, paths)
+    clip = repo.get_clip(clip_id)
+    assert clip.render is not None
+    target = (
+        paths.work_dir / "previews" / f"{clip_id}.mp4"
+        if source == "preview"
+        else paths.media_dir / clip.render.relative_path
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    outside = tmp_path / "secret"
+    outside.write_bytes(b"secret")
+    target.symlink_to(outside)
+    response = await idle.post(
+        f"/api/ui/clips/{clip_id}/test", json={"target_id": "den", "source": source}
+    )
+    assert response.status_code == 422
+    assert device.calls == []
+    assert not (paths.renders_dir / "_test").exists()
+
+
+async def test_source_transaction_failure_rolls_back_placed_version(
+    live: Client,
+    app: FastAPI,
+    repo: Repository,
+    paths: Paths,
+    make_video: Video,
+):
+    clip = await ready_clip(live, app, make_video)
+    before = repo.get_clip(clip["id"])
+    upload_id = await start_upload(live, make_video(name="new.mp4", seconds=2))
+    app.state.db.connection.execute(
+        "CREATE TRIGGER reject_source BEFORE UPDATE OF original ON clips "
+        "BEGIN SELECT RAISE(ABORT, 'source commit failed'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="source commit failed"):
+        await live.post(f"/api/ui/clips/{clip['id']}/source", json={"upload_id": upload_id})
+    assert repo.get_clip(clip["id"]) == before
+    assert not list((paths.originals_dir / clip["id"]).glob("v*"))
+    assert not list(paths.work_dir.glob("upload-*"))
+    original = before.original
+    assert original is not None
+    assert (paths.originals_dir / clip["id"] / original.filename).is_file()
+    assert not any(job.status == "queued" for job in app.state.jobs.list_jobs())
