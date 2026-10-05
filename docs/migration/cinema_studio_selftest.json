@@ -1,0 +1,222 @@
+{
+  "alias": "Cinema Studio · Autoprueba de selección (sin dispositivos)",
+  "mode": "single",
+  "description": "Ejecuta exactamente el bloque de selección nuevo con dry_run en ambos servicios. No toca dispositivos, helpers ni historial. Devuelve las variables resultantes.",
+  "fields": {
+    "forzar_respaldo": {
+      "selector": {
+        "boolean": {}
+      },
+      "default": false
+    },
+    "forzar_contrato_invalido": {
+      "selector": {
+        "boolean": {}
+      },
+      "default": false
+    }
+  },
+  "sequence": [
+    {
+      "variables": {
+        "seleccion": {},
+        "coleccion": "{% set season = states('sensor.temporada_de_cine_activa') %}{% set known = state_attr('sensor.active_collection','collection_priorities') or {} %}{{ season if season in known else 'regular' }}"
+      }
+    },
+    {
+      "variables": {
+        "nuevo": {},
+        "ruta": "cinema_studio",
+        "clip_uri": "",
+        "clip_id": "",
+        "clip_nombre": "",
+        "duracion": 0,
+        "content_start": 0,
+        "content_end": 0,
+        "lead_in": 0,
+        "tail_out": 0,
+        "cierre_anticipado_habilitado": false,
+        "timing": {},
+        "timing_response": {}
+      },
+      "alias": "Cinema Studio: inicializar variables de selección"
+    },
+    {
+      "if": [
+        {
+          "condition": "template",
+          "value_template": "{{ forzar_respaldo | default(false) }}"
+        }
+      ],
+      "then": [
+        {
+          "variables": {
+            "nuevo": {}
+          }
+        }
+      ],
+      "else": [
+        {
+          "action": "cinema_studio.select_next_clip",
+          "data": {
+            "dry_run": true
+          },
+          "response_variable": "nuevo",
+          "continue_on_error": true,
+          "alias": "Cinema Studio: seleccionar clip (offline, contrato v1)"
+        }
+      ]
+    },
+    {
+      "if": [
+        {
+          "condition": "template",
+          "value_template": "{{ forzar_contrato_invalido | default(false) }}"
+        }
+      ],
+      "then": [
+        {
+          "variables": {
+            "nuevo": "{{ dict(nuevo, contract_version=2) }}"
+          }
+        }
+      ]
+    },
+    {
+      "variables": {
+        "nuevo_ok": "{% set r = nuevo if nuevo is mapping else {} %}{% set cid = r.get('clip_id') or '' %}{% set uri = r.get('media_content_id') or '' %}{% set d = r.get('duration') %}{% set s = r.get('content_start_offset') %}{% set e = r.get('content_end_offset') %}{% set l = r.get('lead_in_duration') %}{% set t = r.get('tail_out_duration') %}{{ r.get('contract_version') == 1 and r.get('timing_verified') is sameas true and r.get('file_verified') is sameas true and cid != '' and uri != '' and cid in uri and d is number and s is number and e is number and l is number and t is number and 0 < d <= 7200 and 0 <= s and s < e and e <= d + 0.001 and (s - l) | abs <= 0.002 and (d - e - t) | abs <= 0.002 }}"
+      },
+      "alias": "Cinema Studio: validar contrato completo"
+    },
+    {
+      "if": [
+        {
+          "condition": "template",
+          "value_template": "{{ nuevo_ok }}"
+        }
+      ],
+      "then": [
+        {
+          "variables": {
+            "seleccion": "{{ nuevo }}",
+            "coleccion": "{{ nuevo.collection_id }}",
+            "clip_uri": "{{ nuevo.media_content_id }}",
+            "clip_id": "{{ nuevo.clip_id }}",
+            "clip_nombre": "{{ nuevo.title or nuevo.source_name or nuevo.clip_id }}",
+            "duracion": "{{ nuevo.duration }}",
+            "content_start": "{{ nuevo.content_start_offset }}",
+            "content_end": "{{ nuevo.content_end_offset }}",
+            "lead_in": "{{ nuevo.lead_in_duration }}",
+            "tail_out": "{{ nuevo.tail_out_duration }}",
+            "cierre_anticipado_habilitado": "{{ nuevo.tail_out_duration | float >= 1.0 }}",
+            "ruta": "cinema_studio"
+          },
+          "alias": "Cinema Studio: mapear respuesta a variables del script"
+        }
+      ],
+      "else": [
+        {
+          "variables": {
+            "registro_respaldo": "respaldo_seleccion"
+          }
+        },
+        {
+          "action": "cinema_collections.select_next_clip",
+          "data": {
+            "collection_id": "{{ coleccion }}",
+            "dry_run": true
+          },
+          "response_variable": "seleccion"
+        },
+        {
+          "variables": {
+            "clip_uri": "{{ (seleccion or {}).get('media_content_id') or '' }}",
+            "clip_id": "{{ (seleccion or {}).get('clip_id') or '' }}",
+            "clip_nombre": "{{ (seleccion or {}).get('title') or (seleccion or {}).get('source_name') or ((seleccion or {}).get('relative_output_path') or '').split('/')[-1] }}",
+            "duracion": "{{ (seleccion or {}).get('duration_seconds') | float(0) }}"
+          }
+        },
+        {
+          "action": "shell_command.cinema_clip_metadata",
+          "data": {
+            "clip_id": "{{ clip_id }}"
+          },
+          "response_variable": "timing_response"
+        },
+        {
+          "variables": {
+            "timing": "{{ (timing_response | default({})).get('stdout','{}') | from_json({}) }}"
+          }
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ not timing.get('ok',false) or timing.get('clip_id') != clip_id or timing.get('relative_output_path') != seleccion.get('relative_output_path') }}"
+            }
+          ],
+          "then": [
+            {
+              "action": "input_text.set_value",
+              "target": {
+                "entity_id": "input_text.cinema_resultado"
+              },
+              "data": {
+                "value": "fallido: metadatos del compilado no confirmados"
+              }
+            },
+            {
+              "action": "script.cinema_registrar",
+              "data": {
+                "evento": "fallido",
+                "mensaje": "fallido: metadatos del compilado no confirmados"
+              }
+            },
+            {
+              "stop": "fallido: metadatos del compilado no confirmados"
+            }
+          ]
+        },
+        {
+          "variables": {
+            "duracion": "{{ timing.duration }}",
+            "content_start": "{{ timing.start }}",
+            "content_end": "{{ timing.end }}",
+            "lead_in": "{{ timing.lead }}",
+            "tail_out": "{{ timing.tail }}",
+            "clip_nombre": "{{ timing.name }}",
+            "cierre_anticipado_habilitado": "{{ timing.tail | float >= 1.0 }}"
+          }
+        },
+        {
+          "variables": {
+            "ruta": "cinema_collections"
+          }
+        }
+      ],
+      "alias": "Cinema Studio con respaldo verbatim a Cinema Collections"
+    },
+    {
+      "variables": {
+        "resultado": {
+          "ruta": "{{ ruta }}",
+          "nuevo_ok": "{{ nuevo_ok }}",
+          "clip_uri": "{{ clip_uri }}",
+          "clip_id": "{{ clip_id }}",
+          "clip_nombre": "{{ clip_nombre }}",
+          "coleccion": "{{ coleccion }}",
+          "duracion": "{{ duracion }}",
+          "content_start": "{{ content_start }}",
+          "content_end": "{{ content_end }}",
+          "lead_in": "{{ lead_in }}",
+          "tail_out": "{{ tail_out }}",
+          "cierre_anticipado_habilitado": "{{ cierre_anticipado_habilitado }}"
+        }
+      }
+    },
+    {
+      "stop": "selftest done",
+      "response_variable": "resultado"
+    }
+  ]
+}
