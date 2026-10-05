@@ -50,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CinemaStudioConfigEntry)
     snapshot = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.catalog")
     coordinator = CinemaStudioCoordinator(hass, entry, client, snapshot)
     had_snapshot = await coordinator.async_load_snapshot()
-    manager = CinemaStudioManager(hass, entry, coordinator)
+    manager = CinemaStudioManager(hass, entry, coordinator, client=client)
     coordinator.manager = manager
     await manager.async_setup()
     await coordinator.async_refresh()
@@ -60,8 +60,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: CinemaStudioConfigEntry)
         raise ConfigEntryNotReady("Studio is offline and no catalog snapshot is available")
     entry.runtime_data = CinemaStudioRuntime(client, coordinator, manager)
 
+    async def refresh_manager() -> None:
+        await manager.async_reverify()
+        await manager.async_flush_selections()
+
     def updated() -> None:
-        hass.async_create_task(manager.async_flush_selections())
+        hass.async_create_task(refresh_manager())
 
     entry.async_on_unload(coordinator.async_add_listener(updated))
 

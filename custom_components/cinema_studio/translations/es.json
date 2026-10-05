@@ -78,39 +78,44 @@
   "services": {
     "select_next_clip": {
       "name": "Seleccionar siguiente clip",
-      "description": "Seleccionar siguiente clip",
+      "description": "Selecciona un clip de vídeo verificado del catálogo guardado y registra el historial, salvo en una simulación.",
       "fields": {
         "collection_id": {
-          "name": "Colección"
+          "name": "Colección",
+          "description": "ID o nombre de la colección. Déjelo vacío para usar la temporada activa."
         },
         "season": {
-          "name": "Temporada"
+          "name": "Temporada",
+          "description": "ID o nombre de temporada solo para esta llamada. Déjelo vacío para resolver la temporada activa automáticamente."
         },
         "dry_run": {
-          "name": "Simulación"
+          "name": "Simulación",
+          "description": "Verifica y devuelve un clip sin registrar historial, añadir una reserva ni cambiar la activación de temporada."
         }
       }
     },
     "reset_history": {
       "name": "Restablecer historial",
-      "description": "Restablecer historial",
+      "description": "Borra los clips reproducidos de una colección o de todas si no se indica una colección.",
       "fields": {
         "collection_id": {
-          "name": "Colección"
+          "name": "Colección",
+          "description": "ID o nombre de la colección. Déjelo vacío para restablecer todas las colecciones."
         }
       }
     },
     "refresh": {
       "name": "Actualizar",
-      "description": "Actualizar",
+      "description": "Solicita el catálogo más reciente de Cinema Studio y verifica los archivos de vídeo guardados.",
       "fields": {}
     },
     "import_legacy": {
       "name": "Importar datos anteriores",
-      "description": "Importar datos anteriores",
+      "description": "Importa clips e historial de la integración anterior, o únicamente su historial.",
       "fields": {
         "history_only": {
-          "name": "Solo historial"
+          "name": "Solo historial",
+          "description": "Importa el historial de reproducción sin importar clips de vídeo."
         }
       }
     }

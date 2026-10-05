@@ -27,7 +27,9 @@ async def manager(hass, media_root, catalog_payload):
     coordinator = MagicMock()
     coordinator.data.catalog = parse_catalog(catalog_payload)
     coordinator._client.post_selections = AsyncMock(side_effect=ConnectionError("offline"))
-    result = CinemaStudioManager(hass, entry, coordinator, now=lambda: NOW)
+    result = CinemaStudioManager(
+        hass, entry, coordinator, client=coordinator._client, now=lambda: NOW
+    )
     await result.async_setup()
     return result
 
@@ -101,11 +103,16 @@ async def test_snapshot_serialized_failure(manager, catalog_payload, media_root)
     with pytest.raises(RuntimeError):
         await install
     assert (await selection)["catalog_revision"] == 4
+    data = json.loads(next((media_root / "cinema-studio/consumers").glob("*.json")).read_text())
+    assert set(data["held_render_ids"]) == {"r1", "r2"}
 
 
 async def test_corrupt_consumer(manager, media_root):
     next((media_root / "cinema-studio/consumers").glob("*.json")).write_text("broken")
-    await manager.async_setup()
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    with pytest.raises(ConfigEntryNotReady):
+        await manager.async_setup()
     assert not manager.ready
     assert ir.async_get(manager.hass).async_get_issue(DOMAIN, "consumer_corrupt") is not None
     with pytest.raises(ServiceValidationError) as err:
@@ -115,9 +122,9 @@ async def test_corrupt_consumer(manager, media_root):
 
 async def test_queue_retry(manager):
     await select(manager)
-    await manager.hass.async_block_till_done()
+    await manager.hass.async_block_till_done(wait_background_tasks=True)
     assert len(manager._selection_queue) == 1
-    manager.coordinator._client.post_selections = AsyncMock()
+    manager._client.post_selections = AsyncMock()
     await manager.async_flush_selections()
     assert not manager._selection_queue
     assert (await manager._store.async_load())["selection_queue"] == []
@@ -155,7 +162,7 @@ async def test_activation_restart_action_and_fallback(manager, catalog_payload):
     assert not (await select(manager))["activation_reset"]
     manager.coordinator.data.catalog = parse_catalog(raw)
     restarted = CinemaStudioManager(
-        manager.hass, manager.entry, manager.coordinator, now=lambda: NOW
+        manager.hass, manager.entry, manager.coordinator, client=manager._client, now=lambda: NOW
     )
     await restarted.async_setup()
     assert not (await select(restarted))["activation_reset"]
@@ -256,3 +263,149 @@ async def test_final_fence_failure_retains_superset(manager, catalog_payload, me
     assert (await select(manager))["render_id"] == "r2"
     data = json.loads(next((media_root / "cinema-studio/consumers").glob("*.json")).read_text())
     assert set(data["held_render_ids"]) == {"r1", "r2"}
+
+
+@pytest.mark.parametrize("failure", ["timeout", "corrupt", "os"])
+async def test_setup_failure_retries(manager, failure):
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    from custom_components.cinema_studio.fence import FenceCorrupt, FenceTimeout
+
+    error = {"timeout": FenceTimeout(), "corrupt": FenceCorrupt(), "os": OSError()}[failure]
+    with (
+        patch.object(manager, "_write_fence", side_effect=error),
+        pytest.raises(ConfigEntryNotReady),
+    ):
+        await manager.async_setup()
+    assert not manager.ready
+    if failure == "corrupt":
+        assert ir.async_get(manager.hass).async_get_issue(DOMAIN, "consumer_corrupt")
+    await manager.async_install_snapshot(manager._catalog, {}, AsyncMock())
+    assert manager.ready
+    assert ir.async_get(manager.hass).async_get_issue(DOMAIN, "consumer_corrupt") is None
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+async def test_final_fence_warning_and_corruption(manager, caplog, corrupt):
+    from custom_components.cinema_studio.fence import FenceCorrupt
+
+    original = manager._write_fence
+    calls = 0
+
+    async def write(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise FenceCorrupt() if corrupt else OSError("disk")
+        return await original(*args, **kwargs)
+
+    with patch.object(manager, "_write_fence", write):
+        await manager.async_install_snapshot(manager._catalog, {}, AsyncMock())
+    assert any(
+        record.levelname == "WARNING" and "Final snapshot fence failed" in record.message
+        for record in caplog.records
+    )
+    assert manager.ready is not corrupt
+    if corrupt:
+        assert ir.async_get(manager.hass).async_get_issue(DOMAIN, "consumer_corrupt")
+
+
+async def test_queue_rejected_events_dropped(manager, caplog):
+    from custom_components.cinema_studio.api import StudioRequestError
+
+    await select(manager)
+    await manager.hass.async_block_till_done(wait_background_tasks=True)
+    manager._client.post_selections.side_effect = StudioRequestError(422, "invalid")
+    await manager.async_flush_selections()
+    assert manager._selection_queue == []
+    assert (await manager._store.async_load())["selection_queue"] == []
+    assert "rejected" in caplog.text
+
+
+async def test_queue_bounded(manager, caplog):
+    manager._selection_queue = [{"selection_id": str(i)} for i in range(2000)]
+    response = await select(manager)
+    assert len(manager._selection_queue) == 2000
+    assert manager._selection_queue[0]["selection_id"] == "1"
+    assert manager._selection_queue[-1]["selection_id"] == response["selection_id"]
+    assert len((await manager._store.async_load())["selection_queue"]) == 2000
+    assert "oldest" in caplog.text
+
+
+async def test_periodic_reverification(manager, media_root):
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    path = media_root / manager._catalog.clips[0].render.relative_path
+    path.unlink()
+    await manager.async_setup()
+    assert not manager._verified["r1"]
+    path.write_bytes(b"12345")
+    async_fire_time_changed(manager.hass, dt_util.utcnow() + timedelta(minutes=5, seconds=1))
+    await manager.hass.async_block_till_done(wait_background_tasks=True)
+    assert manager._verified["r1"]
+    assert (await select(manager))["clip_id"] == "clip-a"
+
+
+async def test_fence_oserror_not_ready(manager, caplog):
+    with (
+        patch.object(manager, "_write_fence", side_effect=OSError("disk")),
+        pytest.raises(ServiceValidationError) as err,
+    ):
+        await select(manager)
+    assert err.value.translation_key == "not_ready"
+    assert "Selection fence failed" in caplog.text
+    assert manager._history.to_dict() == {"collections": {}}
+
+
+async def test_pending_season_dry_run(manager, catalog_payload):
+    await select(manager)
+    raw = copy.deepcopy(catalog_payload)
+    raw["seasons"].append(
+        {
+            **raw["seasons"][0],
+            "id": "holiday",
+            "name": "Holiday",
+            "start": "10-01",
+            "end": "10-31",
+            "priority": 10,
+        }
+    )
+    await manager.async_install_snapshot(parse_catalog(raw), raw, AsyncMock())
+    before = manager._state()
+    with patch.object(manager._store, "async_save", wraps=manager._store.async_save) as save:
+        response = await manager.async_select(collection_ref=None, season_ref=None, dry_run=True)
+        assert response["season"] == "holiday"
+        assert not response["activation_reset"]
+        assert manager._state() == before
+        save.assert_not_awaited()
+    assert (await select(manager))["activation_reset"]
+
+
+async def test_response_independent_copies(manager):
+    from custom_components.cinema_studio.const import EVENT_SELECTED
+
+    events = []
+    manager.hass.bus.async_listen(EVENT_SELECTED, lambda event: events.append(event))
+    response = await select(manager)
+    await manager.hass.async_block_till_done(wait_background_tasks=True)
+    response["title"] = "changed"
+    assert manager.last_selection("regular")["title"] == "Film"
+    assert events[0].data["title"] == "Film"
+    events[0].data["title"] = "event changed"
+    assert manager.last_selection("regular")["title"] == "Film"
+
+
+async def test_injected_client(hass, media_root, catalog_payload):
+    client = MagicMock()
+    client.post_selections = AsyncMock()
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    coordinator = MagicMock()
+    coordinator.data.catalog = parse_catalog(catalog_payload)
+    manager = CinemaStudioManager(hass, entry, coordinator, client=client, now=lambda: NOW)
+    await manager.async_setup()
+    await select(manager)
+    await hass.async_block_till_done()
+    client.post_selections.assert_awaited_once()
+    coordinator._client.post_selections.assert_not_called()

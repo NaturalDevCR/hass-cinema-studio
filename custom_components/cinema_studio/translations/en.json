@@ -78,39 +78,44 @@
   "services": {
     "select_next_clip": {
       "name": "Select next clip",
-      "description": "Select next clip",
+      "description": "Select a verified video clip from the cached catalog and record playback history unless this is a dry run.",
       "fields": {
         "collection_id": {
-          "name": "Collection"
+          "name": "Collection",
+          "description": "Collection ID or name. Leave empty to use the active season."
         },
         "season": {
-          "name": "Season"
+          "name": "Season",
+          "description": "Season ID or name for this call only. Leave empty to resolve the active season automatically."
         },
         "dry_run": {
-          "name": "Dry run"
+          "name": "Dry run",
+          "description": "Verify and return a clip without recording history, adding a pin, or changing season activation."
         }
       }
     },
     "reset_history": {
       "name": "Reset history",
-      "description": "Reset history",
+      "description": "Clear played clips for one collection, or all collections when no collection is specified.",
       "fields": {
         "collection_id": {
-          "name": "Collection"
+          "name": "Collection",
+          "description": "Collection ID or name. Leave empty to reset all collections."
         }
       }
     },
     "refresh": {
       "name": "Refresh",
-      "description": "Refresh",
+      "description": "Request the latest catalog from Cinema Studio and recheck cached render files.",
       "fields": {}
     },
     "import_legacy": {
       "name": "Import legacy",
-      "description": "Import legacy",
+      "description": "Import clips and playback history from the legacy integration, or import only its history.",
       "fields": {
         "history_only": {
-          "name": "History only"
+          "name": "History only",
+          "description": "Import playback history without importing video clips."
         }
       }
     }

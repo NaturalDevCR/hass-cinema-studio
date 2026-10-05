@@ -49,3 +49,17 @@ async def test_unloaded(hass):
     with pytest.raises(ServiceValidationError) as err:
         await hass.services.async_call(DOMAIN, "select_next_clip", {}, blocking=True)
     assert err.value.translation_key == "not_ready"
+
+
+@pytest.mark.parametrize("language", ["en", "es"])
+def test_service_descriptions(language):
+    import json
+    from pathlib import Path
+
+    data = json.loads(
+        Path(f"custom_components/cinema_studio/translations/{language}.json").read_text()
+    )
+    for service in data["services"].values():
+        assert service["description"] != service["name"]
+        for field in service.get("fields", {}).values():
+            assert field["description"]

@@ -447,3 +447,93 @@ async def test_invalid_catalog_without_snapshot_retries_and_raises_issue(
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert ir.async_get(hass).async_get_issue(DOMAIN, "invalid_catalog") is not None
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_offline_selection_reload_preserves_activation(
+    hass, entry, aioclient_mock, hass_storage, catalog_payload
+):
+    """Use real snapshot loading, a failing client, and the HA reload lifecycle."""
+    from unittest.mock import AsyncMock
+
+    from custom_components.cinema_studio.api import StudioConnectionError
+    from custom_components.cinema_studio.catalog import parse_catalog
+    from custom_components.cinema_studio.coordinator import CinemaStudioState
+
+    catalog_payload["collections"][0]["playback_mode"] = "sequential"
+    snapshot(hass_storage, entry, catalog_payload)
+    aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
+    with patch(
+        "custom_components.cinema_studio.api.StudioClient.post_selections",
+        new_callable=AsyncMock,
+        side_effect=StudioConnectionError("offline"),
+    ) as post:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        manager = entry.runtime_data.manager
+        args = {"collection_ref": None, "season_ref": None, "dry_run": False}
+        first = await manager.async_select(**args)
+        assert first["clip_id"] == "clip-a"
+        assert not entry.runtime_data.coordinator.data.connected
+        await hass.async_block_till_done(wait_background_tasks=True)
+        post.assert_awaited()
+        assert manager._selection_queue
+        raw = {
+            **catalog_payload,
+            "revision": 5,
+            "seasons": [
+                *catalog_payload["seasons"],
+                {
+                    **catalog_payload["seasons"][0],
+                    "id": "holiday",
+                    "name": "Holiday",
+                    "start": "01-01",
+                    "end": "12-31",
+                    "priority": 10,
+                },
+            ],
+        }
+        coordinator = entry.runtime_data.coordinator
+        await manager.async_install_snapshot(
+            parse_catalog(raw), {"catalog": raw, "etag": None}, coordinator._snapshot.async_save
+        )
+        coordinator.data = CinemaStudioState(parse_catalog(raw), False, None, None)
+        assert (await manager.async_select(**args))["activation_reset"]
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        reloaded = entry.runtime_data.manager
+        assert reloaded is not manager
+        assert reloaded._activation.last_effective_season == "holiday"
+        assert not (await reloaded.async_select(**args))["activation_reset"]
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert reloaded._selection_queue
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_coordinator_update_reverifies_unchanged_catalog(
+    hass, entry, aioclient_mock, catalog_payload, media_root
+):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    manager = entry.runtime_data.manager
+    path = media_root / catalog_payload["clips"][0]["render"]["relative_path"]
+    path.unlink()
+    await manager.async_reverify()
+    assert not manager._verified["r1"]
+    path.write_bytes(b"12345")
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", status=304)
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert manager._verified["r1"]
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "corrupt", "os"])
+async def test_manager_setup_failure_ha_retries(hass, entry, failure):
+    from custom_components.cinema_studio.fence import FenceCorrupt, FenceTimeout
+
+    error = {"timeout": FenceTimeout(), "corrupt": FenceCorrupt(), "os": OSError()}[failure]
+    with patch("custom_components.cinema_studio.fence.ConsumerFence.write", side_effect=error):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert await hass.config_entries.async_unload(entry.entry_id)

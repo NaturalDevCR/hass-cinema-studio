@@ -7,21 +7,25 @@ import logging
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
-from datetime import UTC, datetime, time
+from datetime import datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_change
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_change,
+    async_track_time_interval,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .activation import ActivationState, evaluate_activation
-from .api import StudioConnectionError
+from .api import StudioClient, StudioConnectionError, StudioRequestError
 from .catalog import EMPTY_CATALOG, Catalog, CollectionDef
 from .const import (
     CONF_HISTORY_RESET_MODE,
@@ -32,7 +36,13 @@ from .const import (
     PIN_TTL,
     STORAGE_VERSION,
 )
-from .fence import ConsumerFence, FenceCorrupt, FenceTimeout, FenceWriteResult
+from .fence import (
+    ConsumerFence,
+    FenceCorrupt,
+    FenceTimeout,
+    FenceWriteResult,
+    _iso,  # pyright: ignore[reportPrivateUsage]
+)
 from .history import HistoryState, order_candidates
 from .seasons import UnknownSeasonError, resolve_effective_season
 from .verify import verify_all, verify_render
@@ -52,10 +62,6 @@ def _error(key: str) -> ServiceValidationError:
     return ServiceValidationError(translation_domain=DOMAIN, translation_key=key)
 
 
-def _iso(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
 class CinemaStudioManager:
     """Serialize catalog adoption, verification, selection, and persistence."""
 
@@ -67,10 +73,12 @@ class CinemaStudioManager:
         entry: CinemaStudioConfigEntry,
         coordinator: CinemaStudioCoordinator,
         *,
+        client: StudioClient,
         rng: random.Random | None = None,
         now: Callable[[], datetime] = dt_util.utcnow,
     ) -> None:
         self.hass, self.entry, self.coordinator = hass, entry, coordinator
+        self._client = client
         self._rng, self._now = rng or random.Random(), now
         self._lock = asyncio.Lock()
         self._flush_lock = asyncio.Lock()
@@ -150,6 +158,8 @@ class CinemaStudioManager:
                 activation.get("last_effective_season"), activation.get("last_effective_collection")
             )
             self._selection_queue = data.get("selection_queue", [])
+            if self._cap_queue():
+                await self._store.async_save(self._state())
             from .coordinator import CinemaStudioState
 
             state = cast(CinemaStudioState | None, self.coordinator.data)
@@ -162,11 +172,11 @@ class CinemaStudioManager:
                 self._verified = await self.hass.async_add_executor_job(
                     verify_all, self._media_root, [clip.render for clip in self._catalog.clips]
                 )
-            except FenceCorrupt:
+            except FenceCorrupt as err:
                 self._corrupt()
-                return
-            except FenceTimeout:
-                return
+                raise ConfigEntryNotReady("Consumer file is corrupt") from err
+            except (FenceTimeout, OSError) as err:
+                raise ConfigEntryNotReady("Consumer fence is unavailable") from err
             self._ready = True
             ir.async_delete_issue(self.hass, DOMAIN, "consumer_corrupt")
         if not self._listeners_registered:
@@ -182,6 +192,13 @@ class CinemaStudioManager:
                 self.entry.async_on_unload(
                     async_track_state_change_event(self.hass, [entity], changed)
                 )
+
+            async def reverify(event: datetime) -> None:
+                await self.async_reverify()
+
+            self.entry.async_on_unload(
+                async_track_time_interval(self.hass, reverify, timedelta(minutes=5))
+            )
             self._listeners_registered = True
         self.hass.async_create_task(self.async_flush_selections())
 
@@ -193,18 +210,28 @@ class CinemaStudioManager:
     ) -> None:
         async with self._lock:
             held = self._held | catalog.render_ids()
-            await self._write_fence(self._catalog.revision, held)
+            try:
+                await self._write_fence(self._catalog.revision, held)
+            except FenceCorrupt:
+                self._corrupt()
+                raise
             self._held = held
             verified = await self.hass.async_add_executor_job(
                 verify_all, self._media_root, [clip.render for clip in catalog.clips]
             )
             await persist(raw)
             self._catalog, self._verified = catalog, verified
+            self._ready = True
+            ir.async_delete_issue(self.hass, DOMAIN, "consumer_corrupt")
             try:
                 result = await self._write_fence(catalog.revision, catalog.render_ids())
                 self._held, self._pins = catalog.render_ids(), result.pins
-            except Exception:
-                _LOGGER.debug("Final snapshot fence failed; retaining safe superset", exc_info=True)
+            except Exception as err:
+                if isinstance(err, FenceCorrupt):
+                    self._corrupt()
+                _LOGGER.warning(
+                    "Final snapshot fence failed; retaining safe superset", exc_info=True
+                )
 
     def _resolve(self, season_ref: str | None) -> tuple[str, str]:
         entity_id = self.entry.options.get(CONF_SEASON_ENTITY)
@@ -309,12 +336,16 @@ class CinemaStudioManager:
                         break
                     clip = next(clip for clip in self._catalog.clips if clip.id == clip_id)
                     render, timestamp = clip.render, self._now()
-                    result = await self._write_fence(
-                        self._catalog.revision,
-                        self._held,
-                        new_pins={} if dry_run else {render.id: timestamp + PIN_TTL},
-                        before_write=partial(verify_render, self._media_root, render),
-                    )
+                    try:
+                        result = await self._write_fence(
+                            self._catalog.revision,
+                            self._held,
+                            new_pins={} if dry_run else {render.id: timestamp + PIN_TTL},
+                            before_write=partial(verify_render, self._media_root, render),
+                        )
+                    except OSError as err:
+                        _LOGGER.warning("Selection fence failed", exc_info=True)
+                        raise _error("not_ready") from err
                     if not result.written:
                         self._verified[render.id] = False
                         candidates.remove(clip_id)
@@ -372,16 +403,18 @@ class CinemaStudioManager:
                                 "selected_at",
                             )
                         }
+                        previous_queue = list(self._selection_queue)
                         self._selection_queue.append(event)
+                        self._cap_queue()
                         try:
                             await self._store.async_save(self._state())
                         except Exception:
-                            self._selection_queue.remove(event)
+                            self._selection_queue = previous_queue
                             raise
-                        self._last[collection.id] = response
+                        self._last[collection.id] = dict(response)
                         self.hass.async_create_task(self.async_flush_selections())
-                        self.hass.bus.async_fire(EVENT_SELECTED, response)
-                    return response
+                        self.hass.bus.async_fire(EVENT_SELECTED, dict(response))
+                    return dict(response)
                 raise _error("no_playable_clip")
             except FenceTimeout as err:
                 self._history, self._activation = (
@@ -422,6 +455,33 @@ class CinemaStudioManager:
         response = self._last.get(collection_id)
         return dict(response) if response else None
 
+    def _cap_queue(self) -> bool:
+        excess = len(self._selection_queue) - 2000
+        if excess <= 0:
+            return False
+        del self._selection_queue[:excess]
+        _LOGGER.warning("Selection queue limit exceeded; dropping %s oldest events", excess)
+        return True
+
+    async def async_reverify(self) -> None:
+        """Recover transient verification failures without a new catalog revision."""
+        async with self._lock:
+            try:
+                result = await self._write_fence(self._catalog.revision, self._held)
+                verified = await self.hass.async_add_executor_job(
+                    verify_all, self._media_root, [clip.render for clip in self._catalog.clips]
+                )
+            except FenceCorrupt:
+                self._corrupt()
+                return
+            except (FenceTimeout, OSError):
+                self._ready = False
+                _LOGGER.warning("Render re-verification fence failed", exc_info=True)
+                return
+            self._verified, self._pins = verified, result.pins
+            self._ready = True
+            ir.async_delete_issue(self.hass, DOMAIN, "consumer_corrupt")
+
     async def async_flush_selections(self) -> None:
         async with self._flush_lock:
             while True:
@@ -430,7 +490,11 @@ class CinemaStudioManager:
                 if not events:
                     return
                 try:
-                    await self.coordinator._client.post_selections(events)  # pyright: ignore[reportPrivateUsage]
+                    await self._client.post_selections(events)
+                except StudioRequestError as err:
+                    _LOGGER.warning(
+                        "Selection events rejected (HTTP %s); dropping batch", err.status
+                    )
                 except (StudioConnectionError, ConnectionError):
                     return
                 async with self._lock:
