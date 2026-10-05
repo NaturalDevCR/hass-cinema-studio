@@ -6,7 +6,10 @@ from typing import Any
 
 import pytest
 
-from custom_components.cinema_studio.seasons import resolve_calendar_season
+from cinema_studio.seasons import resolve_calendar_season as studio_resolve
+from custom_components.cinema_studio.seasons import (
+    resolve_calendar_season as integration_resolve,
+)
 
 CASES: list[dict[str, Any]] = json.loads(
     (Path(__file__).resolve().parents[2] / "contract" / "season_cases.json").read_text(
@@ -24,10 +27,12 @@ class _Season:
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case["name"] for case in CASES])
+def test_studio_calendar(case: dict[str, Any]) -> None:
+    seasons = [_Season(**season) for season in case["seasons"]]
+    assert studio_resolve(seasons, date.fromisoformat(case["date"])) == case["expected"]
+
+
+@pytest.mark.parametrize("case", CASES, ids=[case["name"] for case in CASES])
 def test_integration_calendar(case: dict[str, Any]) -> None:
-    assert (
-        resolve_calendar_season(
-            [_Season(**s) for s in case["seasons"]], date.fromisoformat(case["date"])
-        )
-        == case["expected"]
-    )
+    seasons = [_Season(**season) for season in case["seasons"]]
+    assert integration_resolve(seasons, date.fromisoformat(case["date"])) == case["expected"]

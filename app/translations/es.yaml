@@ -1,0 +1,4 @@
+configuration:
+  log_level:
+    name: Nivel de registro
+    description: Controla el nivel de detalle que la aplicación escribe en el registro.
