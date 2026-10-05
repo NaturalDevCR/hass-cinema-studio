@@ -52,7 +52,8 @@ app/src/cinema_studio/
   errors.py          StudioError, NotFoundError, ConflictError, InvalidError
   models.py          pydantic models (API + DB)
   seasons.py         season_matches(), resolve_calendar_season()  (copy of SE)
-  timing.py          Timing dataclass, round_timing(), validate_timing()
+  timing.py          Timing, round_timing(), timing_problems() (Task 1; identical copy in the integration)
+  timing_validation.py validate_timing() → InvalidError
   db.py              Database (schema, migrations, seeds)
   repository.py      Repository (CRUD, renders, catalog revision, catalog document)
   profiles.py        ProcessingProfile & co (port of Clips profile_validation.py)
@@ -146,7 +147,7 @@ type State = { version: string; api_token_masked: string; catalog_revision: numb
              retired_bytes: number; work_bytes: number; network_fs: boolean };
   gc: { enabled: boolean; halted_reason: string | null; last_run_at: string | null; deleted_last_run: number };
   consumers: ConsumerInfo[]; legacy_import: LegacyReport | null; settings: Settings }
-type LegacyReport = { run_id: string; started_at: string; finished_at: string | null;
+type LegacyReport = { run_id: string; started_at: string; finished_at: string | null; catalog_revision: number;
   imported: string[]; queued_for_render: string[]; needs_source: string[];
   skipped: { clip_id: string; reason: string }[]; missing_assets: string[] }
 ```
@@ -200,6 +201,7 @@ Legacy import is two calls so the App never needs Worker credentials: (1) `POST 
 | GET/POST/PATCH/DELETE | `seasons`, `seasons/{id}` | as SE + `collection_id` | `Season` / `204` |
 | GET | `seasons/resolve?date=YYYY-MM-DD` | – | `{date, season_id, collection_id}` |
 | GET/POST/PATCH/DELETE | `normalization-profiles[/{id}]` | as SE profiles | as SE (PATCH returns `{profile, affected_clip_ids}`) |
+| POST | `normalization-profiles/{id}/apply` | `{clip_ids: string[]}` or `{collection_id}` | `{queued: number}` |
 | GET/POST/PATCH/DELETE | `processing-profiles[/{id}]` | `{id?, name, settings}` | `ProcessingProfile` (409 delete when used) |
 | GET | `assets` | – | `Asset[]` |
 | POST | `assets` | multipart `file` | `Asset` |
@@ -212,11 +214,13 @@ Legacy import is two calls so the App never needs Worker credentials: (1) `POST 
 | DELETE | `clips/{id}` | – | `204` (render retired, original deleted) |
 | POST | `clips/bulk` | `{ids, set:{collection_id?, enabled?, profile_id?}}` | `{updated, queued}` |
 | GET | `clips/{id}/original`, `clips/{id}/preview`, `clips/{id}/render` | Range | video bytes |
-| GET | `clips/{id}/poster.jpg`, `clips/{id}/filmstrip.json`, `clips/{id}/filmstrip/{index}.jpg` | – | image / `{interval, count, width, height}` |
+| GET | `clips/{id}/poster.jpg` | – | JPEG poster of the published render (`thumbs/<clip_id>/r<n>/poster.jpg`), fallback original poster |
+| GET | `clips/{id}/filmstrip.json`, `clips/{id}/filmstrip/{index}.jpg` | – | filmstrip of the **original** timeline (`thumbs/<clip_id>/original/`), `{interval, count, width, height}` / JPEG |
+| POST | `clips/{id}/source` | `{upload_id}` (a completed-bytes upload session, see uploads) | `Clip` (original replaced, `needs_source` false, sha256 recorded, render queued) |
 | POST | `clips/{id}/test` | `{target_id, source: "preview" | "render"}` | `{ok: true, media_content_id}` |
-| POST | `uploads` / PUT `uploads/{id}/chunks/{n}` / POST `uploads/{id}/complete` | as SE; complete body `{collection_id, title?}` | `Clip` |
+| POST | `uploads` / PUT `uploads/{id}/chunks/{n}` / POST `uploads/{id}/complete` | as SE; complete body `{collection_id, title?}` | `Clip` (for source repair, call `clips/{id}/source` with the upload id instead of `complete`) |
 | GET | `jobs` | – | `Job[]` |
-| POST | `gc/run` | – | `{deleted: number, halted_reason: string | null}` |
+| POST | `gc/run` | – | `{deleted: number, halted_reason: string | null}` (`deleted` = `len(GcResult.deleted)`) |
 
 ### Home Assistant contract
 
@@ -233,7 +237,9 @@ Legacy import is two calls so the App never needs Worker credentials: (1) `POST 
 **Model:** Sonnet. **Branch:** `main`.
 
 **Files:**
-- Create: `pyproject.toml`, `.gitignore`, `LICENSE`, `README.md` (stub), `hacs.json`, `repository.yaml`, `scripts/verify.sh`, `.github/workflows/{quality,validate,app-build}.yml`, `contract/openapi-v1.yaml`, `contract/season_cases.json`, `contract/timing_cases.json`, `contract/selection_response.schema.json`, `tests/contract/test_openapi.py`, `tests/contract/test_schema.py`, `tests/test_repository_metadata.py`, `app/src/cinema_studio/__init__.py`, `custom_components/cinema_studio/manifest.json`, `app/config.yaml`
+- Create: `pyproject.toml`, `.gitignore`, `LICENSE`, `README.md` (stub), `hacs.json`, `repository.yaml`, `scripts/verify.sh`, `.github/workflows/{quality,validate,app-build}.yml`, `contract/openapi-v1.yaml`, `contract/season_cases.json`, `contract/timing_cases.json`, `contract/selection_response.schema.json`, `tests/contract/test_openapi.py`, `tests/contract/test_schema.py`, `tests/contract/test_timing_cases.py`, `tests/test_repository_metadata.py`, `app/src/cinema_studio/__init__.py`, `app/src/cinema_studio/timing.py`, `custom_components/cinema_studio/__init__.py` (docstring only), `custom_components/cinema_studio/timing.py`, `custom_components/cinema_studio/manifest.json`, `app/config.yaml`
+
+Both tracks need the timing invariants, so Task 1 ships them (identical code in both packages; a test asserts the two files are byte-identical apart from the module docstring line).
 
 **Interfaces:**
 - Produces: `uv sync --all-groups` env for all tracks; `scripts/verify.sh`; contract files with the formats below.
@@ -399,6 +405,59 @@ def test_unverified_fails() -> None:
 
 `tests/test_repository_metadata.py`: copy from SE and adapt: versions agree across `manifest.json`, `app/config.yaml`, `__init__.__version__`; hacs name "Cinema Studio"; app slug `cinema_studio`, ingress 8099, `"media:rw" in map`, discovery `["cinema_studio"]`, no `image` key.
 
+- [ ] **Step 7b: Timing module** — write `app/src/cinema_studio/timing.py` and copy it to `custom_components/cinema_studio/timing.py`:
+
+```python
+"""Timing invariants shared by the Cinema Studio App and integration (kept identical in both)."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass
+
+TOLERANCE = 0.001
+MAX_DURATION = 7200.0
+
+
+@dataclass(frozen=True)
+class Timing:
+    duration: float
+    content_start: float
+    content_end: float
+    lead_in: float
+    tail_out: float
+    content_duration: float
+
+    def as_dict(self) -> dict[str, float]:
+        return asdict(self)
+
+
+def round_timing(timing: Timing) -> Timing:
+    return Timing(**{key: round(value, 3) for key, value in asdict(timing).items()})
+
+
+def timing_problems(timing: Timing) -> list[str]:
+    values = asdict(timing)
+    problems = [f"{key} is not finite" for key, value in values.items() if not math.isfinite(value)]
+    if problems:
+        return problems
+    if not 0 < timing.duration <= MAX_DURATION:
+        problems.append("duration out of range")
+    if abs(timing.content_start - timing.lead_in) > TOLERANCE:
+        problems.append("content_start differs from lead_in")
+    if not 0 <= timing.content_start < timing.content_end <= timing.duration + TOLERANCE:
+        problems.append("content bounds out of order")
+    if abs(timing.content_duration - (timing.content_end - timing.content_start)) > TOLERANCE:
+        problems.append("content_duration mismatch")
+    if abs(timing.tail_out - (timing.duration - timing.content_end)) > TOLERANCE:
+        problems.append("tail_out mismatch")
+    if timing.lead_in < 0 or timing.tail_out < -TOLERANCE:
+        problems.append("negative margin")
+    return problems
+```
+
+`tests/contract/test_timing_cases.py`: parametrize over `contract/timing_cases.json` for **both** `cinema_studio.timing` (App, import via `app/src` path) and `custom_components.cinema_studio.timing`, asserting `(timing_problems(Timing(**case["timing"])) == []) == case["valid"]`; plus `test_timing_modules_identical` comparing both files with the first line removed.
+
 - [ ] **Step 8: Verify** — `uv sync --all-groups && uv run pytest -q tests/contract tests/test_repository_metadata.py && uv run ruff check . && uv run ruff format --check .` → PASS.
 - [ ] **Step 9: README stub** (title, one paragraph, "Work in progress").
 - [ ] **Step 10: Commit** `chore: scaffold repository, tooling, CI and v1 contract`.
@@ -482,7 +541,7 @@ def small_profile_settings() -> dict[str, object]:
 
 **Model:** Sonnet. **Branch:** `track/studio`.
 
-**Files:** Create `app/src/cinema_studio/{config,errors,models,seasons,timing,db,repository}.py`; Test `tests/studio/conftest.py`, `tests/studio/test_repository.py`, `tests/studio/test_timing.py`, `tests/contract/test_season_cases.py` (studio half), `tests/contract/test_timing_cases.py` (studio half).
+**Files:** Create `app/src/cinema_studio/{config,errors,models,seasons,db,repository}.py`; Modify `app/src/cinema_studio/timing.py` only to add `validate_timing` **in a new module** `app/src/cinema_studio/timing_validation.py` (keep `timing.py` identical to the integration copy); Test `tests/studio/conftest.py`, `tests/studio/test_repository.py`, `tests/studio/test_timing_validation.py`, `tests/contract/test_season_cases.py` (studio half).
 
 **Interfaces (Produces):**
 
@@ -517,17 +576,9 @@ def load_options(path: Path) -> dict[str, object]
 
 # errors.py — StudioError, NotFoundError, ConflictError, InvalidError (as SE)
 
-# timing.py
-@dataclass(frozen=True)
-class Timing:
-    duration: float; content_start: float; content_end: float
-    lead_in: float; tail_out: float; content_duration: float
-    def as_dict(self) -> dict[str, float]
-TOLERANCE = 0.001
-MAX_DURATION = 7200.0
-def round_timing(t: Timing) -> Timing                  # round each field to 3 decimals
-def timing_problems(t: Timing) -> list[str]            # [] when valid; messages otherwise (finite, ranges, equalities)
-def validate_timing(t: Timing) -> Timing               # round then raise InvalidError(problems) if any
+# timing.py — from Task 1 (Timing, round_timing, timing_problems, TOLERANCE, MAX_DURATION); do not edit
+# timing_validation.py
+def validate_timing(t: Timing) -> Timing               # round_timing then raise InvalidError("; ".join(problems)) if any
 
 # seasons.py — verbatim copy of ~/Dev/hass-sound-effects/app/src/sound_effects_studio/seasons.py
 
@@ -627,7 +678,7 @@ Rules (raise the listed error):
 - Seeds: collection `regular` ("Regular", color `#f59e0b`, icon `mdi:movie-open`, mode `random`, profile `compatibility-4k-loudness`), processing profile `compatibility-4k-loudness` (name "Compatibility 4K Loudness", settings `{}` until Task 3 fills defaults through the validator), season `regular` (builtin, collection `regular`), four normalization profiles, settings defaults `{max_upload_mb: 4096, max_duration_s: 7200, default_lead_in: 2.0, default_tail_out: 2.0, disk_reserve_bytes: 2147483648, test_targets: [], protected_entities: ["media_player.otocuma_dp", "cover.ocl_screen_projector"]}`, `meta.catalog_revision = 0`.
 - Clip ids: `str(uuid.uuid4())` unless given (import keeps Worker ids). New clip `sort_key` = `f"{collection_id}/{clip_id}.mp4".casefold()` (same rule as the Worker's `_sequential_key`, so sequential order is consistent between imported and new clips).
 
-- [ ] **Step 1: Failing tests** — `test_timing.py` (one test per invariant + rounding: `round_timing(Timing(1.00049,...))` → `1.0`; `validate_timing` raises InvalidError listing every problem); `tests/contract/test_timing_cases.py` parametrized over `contract/timing_cases.json` asserting `(timing_problems(...) == []) == case["valid"]`; `tests/contract/test_season_cases.py` studio half (copy SE file, import `cinema_studio.seasons`); `test_repository.py`: seeds; revision bump/no-bump table above (one assertion each); collection delete conflicts; season with unknown collection → InvalidError; `set_collection_order` filters unknown ids; `publish_render` retires previous with `retired_revision` == new revision and sets clip ready; `publish_render` with invalid timing → InvalidError and nothing changes; `next_render_n` counts deleted rows; `catalog_document` excludes clips without published render and matches the Catalog key set exactly; `fallback_after_missing` picks the newest earlier render whose file exists, else marks failed; `delete_clip` retires the published render.
+- [ ] **Step 1: Failing tests** — `test_timing_validation.py` (rounding `1.00049` → `1.0` before checks; `validate_timing` raises InvalidError listing every problem; valid production example returns rounded Timing); `tests/contract/test_season_cases.py` studio half (copy SE file, import `cinema_studio.seasons`); `test_repository.py`: seeds; revision bump/no-bump table above (one assertion each); collection delete conflicts; season with unknown collection → InvalidError; `set_collection_order` filters unknown ids; `publish_render` retires previous with `retired_revision` == new revision and sets clip ready; `publish_render` with invalid timing → InvalidError and nothing changes; `next_render_n` counts deleted rows; `catalog_document` excludes clips without published render and matches the Catalog key set exactly; `fallback_after_missing` picks the newest earlier render whose file exists, else marks failed; `delete_clip` retires the published render.
 - [ ] **Step 2: Run** `uv run pytest tests/studio tests/contract -q` → FAIL (modules missing).
 - [ ] **Step 3: Implement** the modules.
 - [ ] **Step 4: Run** tests + `uv run pyright` + `uv run ruff check . && uv run ruff format --check .` → PASS.
@@ -664,6 +715,7 @@ async def measure_loudness(path: Path, *, start: float | None = None, end: float
     # (integrated_lufs, true_peak) via loudnorm print_format=json; -inf → None
 async def make_poster(src: Path, dst: Path, at: float) -> None              # 640px wide JPEG
 async def make_filmstrip(src: Path, dst_dir: Path, *, duration: float) -> dict[str, int | float]
+    # always run on the ORIGINAL (editor timeline = source timeline); dst_dir = thumbs/<clip_id>/original/
     # interval = max(1.0, duration / 60) seconds; frames scaled to 160px wide JPEG named 0000.jpg…;
     # writes dst_dir/"filmstrip.json" {"interval", "count", "width", "height"}; returns that dict
 
@@ -815,15 +867,26 @@ class JobQueue:
     def enqueue_probe(self, clip_id: str) -> Job           # probe original → set_original → enqueue_render + enqueue_thumbs
     def enqueue_render(self, clip_id: str) -> Job          # coalesces a queued (not running) render for the same clip
     def enqueue_preview(self, clip_id: str, recipe: Recipe) -> Job
-    def enqueue_thumbs(self, clip_id: str) -> Job          # poster + filmstrip from the published render, else original
+    def enqueue_thumbs(self, clip_id: str) -> Job
+        # original: thumbs/<clip_id>/original/{poster.jpg, filmstrip.json, 0000.jpg…} (once per original sha256)
+        # published render: thumbs/<clip_id>/r<n>/poster.jpg (poster at content_start + 1 s)
     def list_jobs(self) -> list[Job]
     async def wait_idle(self, timeout: float = 120) -> None
     async def run_gc(self) -> GcResult                     # runs GarbageCollector.run in a thread
 ```
 
+Render identity: at enqueue the job freezes `recipe_hash` (Task 3 `recipe_hash`) and the processing-profile fingerprint (profile settings + referenced asset sha256s). On success, `publish_render` stores them; `render_pending` is cleared **only if** the clip's current recipe hash and current profile fingerprint still equal the job's frozen values — otherwise `render_pending` stays true and a new render is enqueued (an older job finishing never hides a newer edit).
+
+Propagation (`JobQueue.propagate(reason)` helpers, called by Task 8/9 endpoints; each sets `render_pending=True` via the repository — which bumps the catalog revision — and enqueues renders):
+- `on_processing_profile_changed(profile_id)` → clips in collections using that profile.
+- `on_normalization_profile_changed(profile_id)` → clips whose recipe `profile_id` equals it (only when targets changed).
+- `on_collection_profile_changed(collection_id)` → clips in that collection.
+- `on_asset_changed(filename)` → clips in collections whose profile references the asset as intro or outro (upload of a previously `missing` asset, or replacement).
+- moving a clip to a collection with a different processing profile → that clip.
+
 Render job: status `rendering` (or `processing` when no render yet); refuse with failed "needs source" when `needs_source`; resolve collection profile (validate), normalization override, intro/outro assets (missing asset → failed "asset <name> missing: upload it in Organize"); `store.check_space(store.estimate_render_bytes(...), settings.disk_reserve_bytes)`; `engine.render(plan)` into `store.staging_path(job.id, "out.mp4")`; `n = repo.next_render_n`; `store.publish_file`; `repo.publish_render(RenderRecord(...timing_source="measured"...))`; enqueue thumbs. Failure: `set_status(failed, error)` keeps the previous published render; staging removed. Preview job writes `.work/previews/<clip_id>.mp4` via staging + `os.replace`, sets `has_preview`. Hourly background task calls `run_gc()`; job loop never dies (catch `Exception`, error = last 400 chars). One worker, FIFO. Timeout per render = `max(300, 120 * minutes)` (Clips `timeout_seconds_per_minute`).
 
-- [ ] **Step 1: Failing tests** (real ffmpeg, small profile): upload-like flow (create clip with original from `make_video`, `enqueue_probe`) → status ready, render r1 published, file at the recorded path, thumbs present; `set_recipe` + `enqueue_render` → r2 published, r1 retired with file still present; failure (replace original with garbage) → failed, r2 still published; render coalescing; missing asset → failed with message; insufficient space (monkeypatch `free_bytes`) → failed "not enough free space"; preview sets `has_preview` and catalog revision unchanged; notifier debounce (copy SE test).
+- [ ] **Step 1: Failing tests** (real ffmpeg, small profile): stale job (recipe changed while rendering — simulate by changing the recipe from the progress callback) publishes but leaves `render_pending` true and enqueues another render; each propagation helper marks exactly the affected clips pending and enqueues them; upload-like flow (create clip with original from `make_video`, `enqueue_probe`) → status ready, render r1 published, file at the recorded path, thumbs present; `set_recipe` + `enqueue_render` → r2 published, r1 retired with file still present; failure (replace original with garbage) → failed, r2 still published; render coalescing; missing asset → failed with message; insufficient space (monkeypatch `free_bytes`) → failed "not enough free space"; preview sets `has_preview` and catalog revision unchanged; notifier debounce (copy SE test).
 - [ ] **Step 2–4:** FAIL → implement → PASS (+ pyright, ruff).
 - [ ] **Step 5: Commit** `feat(studio): add render job queue, previews, thumbnails and catalog notifier`.
 
@@ -861,7 +924,7 @@ class LegacyImporter:
     def discard_stale(self) -> None        # stage runs older than 1 h: delete .work/import/<run_id>
 ```
 
-Stage (refuse with `ConflictError` if a run is active; `InvalidError` if `worker.queue_depth > 0` or `active_job_ids` non-empty or local time in 03:00–03:30):
+Stage (refuse with `ConflictError` if a run is active; `InvalidError` if `worker.queue_depth > 0` or `active_job_ids` non-empty or local time in 03:00–03:30; `InvalidError` unless `roots.source` and `roots.compiled` resolve to directories inside `paths.media_dir` **and** outside `paths.root` — caller-supplied roots are never trusted beyond `/media`, and the App's own tree is never a source):
 1. Validate every profile with `profiles.validate_settings` (invalid → rejected `profile_invalid` for its clips).
 2. For each clip with `state != "deleted"`:
    - Source: resolve `roots.source / relative_source_path` (must stay inside `roots.source` after `resolve()`; must be a regular file) → `os.link` into `.work/import/<run_id>/src/<clip_id>/<name>` → sha256:size must equal `metadata.source_fingerprint` (else mark `needs_source`; staged source dropped).
@@ -871,10 +934,10 @@ Stage (refuse with `ConflictError` if a run is active; `InvalidError` if `worker
 
 Commit:
 1. Load stage; for each staged clip compare the re-fetched clip (`updated_at`, `metadata.output_fingerprint`, `metadata.source_fingerprint`) — any difference → skipped `changed_during_import`.
-2. Create/update in this order inside a single logical run (each clip in its own DB transaction): processing profiles (same ids; skip existing ids), assets (each referenced filename present in `assets_dir` → ready else row `missing`), collections (same ids; `playback_mode`, `order = ordered_clip_ids`, `processing_profile_id`), seasons from `manifest.seasons` (create or update by id; `regular` updates only `collection_id`), then clips: `store_original(link=True)` from staging; `create_clip(clip_id=<worker id>, title=Path(relative_source_path).stem, source_name=Path(relative_source_path).name, sort_key=relative_output_path.casefold() if relative_output_path else f"{collection}/{id}.mp4".casefold(), recipe=Recipe(lead_in=…, tail_out=… from Worker timing or settings defaults), needs_source=…, status="ready" if output accepted else "processing")`; accepted output → `store.publish_file(staged_out, clip_id, n=1)` + `repo.publish_render(... timing_source ...)`; output rejected but source ok → `jobs.enqueue_render`; clips already present (same id) are skipped `already_imported` (idempotent).
+2. Create/update in this order inside a single logical run (each clip in its own DB transaction): processing profiles (same ids; skip existing ids), assets (each referenced filename present in `assets_dir` → ready else row `missing`), collections (same ids; `playback_mode`, `processing_profile_id`; order NOT written yet), seasons from `manifest.seasons` (create or update by id; `regular` updates only `collection_id`), then clips: `store_original(link=True)` from staging; `create_clip(clip_id=<worker id>, title=Path(relative_source_path).stem, source_name=Path(relative_source_path).name, sort_key=relative_output_path.casefold() if relative_output_path else f"{collection}/{id}.mp4".casefold(), recipe=Recipe(lead_in=…, tail_out=… from Worker timing or settings defaults), needs_source=…, status="ready" if output accepted else "processing")`; accepted output → `store.publish_file(staged_out, clip_id, n=1)` + `repo.publish_render(... timing_source ...)`; output rejected but source ok → `jobs.enqueue_render`; clips already present (same id) are skipped `already_imported` (idempotent); a staged clip missing from the re-fetched list is skipped `missing_from_refetch`. After all clips: for each collection **created in this run** call `set_collection_order(ordered_clip_ids)`; existing collections keep their (possibly edited) order. Report `catalog_revision` = revision after the run.
 3. Remove `.work/import/<run_id>`; save and return `LegacyReport`.
 
-- [ ] **Step 1: Failing tests** (build a fake Worker tree under `tmp_path/media/cinema-collections/{source,compiled}/regular/…` with `make_video` outputs; compute real fingerprints; use the production example timing scaled to the fixture duration): happy path imports with same ids, inode shared with Worker files, timing equals manifest, `timing_source == "legacy_worker"`; fingerprint mismatch → no render, `queued_for_render`; source mismatch → `needs_source`; all-timing-absent → `legacy_full_file`; partial timing → rejected output; path escape (`../../etc/passwd`) → rejected `unsafe_path`; changed `updated_at` at commit → skipped; second run → `already_imported`; busy Worker → InvalidError; run older than 1 h discarded; Worker later `os.replace`s its compiled file → our render bytes unchanged.
+- [ ] **Step 1: Failing tests** (build a fake Worker tree under `tmp_path/media/cinema-collections/{source,compiled}/regular/…` with `make_video` outputs; compute real fingerprints; use the production example timing scaled to the fixture duration): happy path imports with same ids, inode shared with Worker files, timing equals manifest, `timing_source == "legacy_worker"`; fingerprint mismatch → no render, `queued_for_render`; source mismatch → `needs_source`; all-timing-absent → `legacy_full_file`; partial timing → rejected output; path escape (`../../etc/passwd`) → rejected `unsafe_path`; changed `updated_at` at commit → skipped; staged clip absent from refetch → `missing_from_refetch`; custom order applied after clips exist and preserved on a rerun after the user edits it; roots outside media dir or inside `cinema-studio/` → InvalidError; second run → `already_imported`; busy Worker → InvalidError; run older than 1 h discarded; Worker later `os.replace`s its compiled file → our render bytes unchanged.
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(studio): add staged, fingerprint-verified legacy import`.
 
@@ -884,9 +947,9 @@ Commit:
 
 **Files:** Create `api_ui_organize.py`; Modify `app.py`; Test `tests/studio/test_api_ui_organize.py`.
 
-Endpoints exactly as the UI API rows `state`, `token*`, `settings`, `collections*`, `seasons*`, `normalization-profiles*`, `processing-profiles*`, `assets*`, `gc/run`. Prefix `/api/ui`, `require_ingress`. `state.consumers`: union of `repo.list_consumers_seen()` and consumer files, with `file_present`, `held_revision`, pin count. `state.gc` from the last `GcResult` (kept in `app.state`). `normalization-profiles/{id}/apply` with `{clip_ids}` or `{collection_id}` sets `recipe.profile_id` and enqueues renders. `PUT settings` validates `test_targets` (`media_player.` only, unique ids, not in `protected_entities`). Asset upload: multipart, extension in `.mp4 .mov .mkv .webm .m4v`, saved atomically to `assets_dir/<safe name>`, probed (invalid → 422), status ready; asset delete 409 when referenced by any processing profile (`intro_reference`/`outro_reference`).
+Endpoints exactly as the UI API rows `state`, `token*`, `settings`, `collections*`, `seasons*`, `normalization-profiles*`, `processing-profiles*`, `assets*`, `gc/run`. Prefix `/api/ui`, `require_ingress`. `state.consumers`: union of `repo.list_consumers_seen()` and consumer files, with `file_present`, `held_revision`, pin count. `state.gc` from the last `GcResult` (kept in `app.state`). `normalization-profiles/{id}/apply` with `{clip_ids}` or `{collection_id}` sets `recipe.profile_id` and enqueues renders. `PUT settings` validates `test_targets` (`media_player.` only, unique ids, not in `protected_entities`). Asset upload: multipart, extension in `.mp4 .mov .mkv .webm .m4v`, saved atomically to `assets_dir/<safe name>`, probed (invalid → 422), status ready, then `jobs.on_asset_changed(name)`; asset delete 409 when referenced by any processing profile (`intro_reference`/`outro_reference`). Processing profile PATCH → `jobs.on_processing_profile_changed`; normalization profile PATCH with changed targets → `jobs.on_normalization_profile_changed`; collection PATCH changing `processing_profile_id` → `jobs.on_collection_profile_changed`. Responses report `affected_clip_ids`.
 
-- [ ] **Step 1: Failing tests** — CRUD round-trips; conflicts; `seasons/resolve` returns `collection_id`; processing profile invalid settings → 422; asset upload/probe/delete conflict; settings rejects `remote.x` and protected entity; `gc/run` returns result; state never leaks the full token.
+- [ ] **Step 1: Failing tests** — CRUD round-trips; conflicts; profile/asset/collection-profile edits mark exactly the affected clips pending and queue renders; `seasons/resolve` returns `collection_id`; processing profile invalid settings → 422; asset upload/probe/delete conflict; settings rejects `remote.x` and protected entity; `gc/run` returns result; state never leaks the full token.
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(studio): add organize, profiles, assets, settings and state endpoints`.
 
@@ -900,11 +963,12 @@ Rules:
 - Upload complete: new uuid clip, original moved to `originals/<id>/`, title from filename stem (`-`/`_` → spaces), recipe `Recipe(lead_in=settings.default_lead_in, tail_out=settings.default_tail_out)`, `enqueue_probe`.
 - `PUT recipe`: `Recipe.validate_for(original)` (trim within duration ±0.05, `trim_start < trim_end`, crop inside source dims and ≥ 64×64, fades ≥ 0 and sum ≤ trimmed length, lead/tail 0…10, gain −24…24, `profile_id` exists or null) → `set_recipe` → `enqueue_render`.
 - Streams: `FileResponse` with Range (`video/mp4`); `render` serves the published render; 404 when missing.
-- Thumbs: `poster.jpg`, `filmstrip.json`, `filmstrip/{index}.jpg` from `thumbs_dir/<clip_id>/` (index must be int 0…count-1).
+- Thumbs: `poster.jpg` from `thumbs/<clip_id>/r<n>/` of the published render (fallback `thumbs/<clip_id>/original/poster.jpg`); `filmstrip.json` and `filmstrip/{index}.jpg` from `thumbs/<clip_id>/original/` (index int 0…count-1).
+- Source repair: `POST clips/{id}/source {upload_id}` — upload session must be complete (all bytes); file probed (must have video); stored with `store_original` (replacing the old original dir atomically: write new dir, swap, delete old); `set_original` with new sha256; `needs_source=False`; `enqueue_thumbs`; `enqueue_render`. Works for any clip (also replaces a good source).
 - Test on device: target from `settings.test_targets` (404 unknown); re-check entity starts with `media_player.` and is not in `protected_entities` (403); source `render` → media-source URI of the published render; `preview` → copy preview to `renders/_test/<clip_id>-<token_hex(4)>.mp4` (deleted after 1 h by the periodic task; `_test` is excluded from `scan_renders`) and use its media-source URI; `supervisor.call_service("media_player", "play_media", {"entity_id", "media_content_id", "media_content_type": "video"})`; supervisor unavailable → 503.
 - Delete clip: `repo.delete_clip` (render retired, GC removes later); delete original dir and thumbs immediately.
 
-- [ ] **Step 1: Failing tests** — chunked upload of a generated mp4 → ready after `wait_idle` with poster/filmstrip; oversize 413; bad extension 415; recipe validation errors (one per rule); preview flow; bulk enable/collection/profile; streams with Range 206; thumbs endpoints; test-on-device payload recorded with a fake supervisor; protected entity 403; jobs ordering.
+- [ ] **Step 1: Failing tests** — chunked upload of a generated mp4 → ready after `wait_idle` with poster/filmstrip; oversize 413; bad extension 415; recipe validation errors (one per rule); preview flow; bulk enable/collection/profile; streams with Range 206; thumbs endpoints; test-on-device payload recorded with a fake supervisor; protected entity 403; source repair clears `needs_source` and queues render; jobs ordering.
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(studio): add clip, upload, recipe, stream, thumbnail and test-on-device endpoints`.
 
@@ -917,7 +981,7 @@ Rules:
 Port SE's Dockerfile and entry script (rename; pip pins `fastapi==0.115.14 uvicorn[standard]==0.32.1 httpx==0.28.1 pydantic==2.11.7 python-multipart==0.0.20`; `apk add --no-cache ffmpeg`). Icons: amber rounded square with a white film-strip glyph (draw with a small Python script using only stdlib `zlib`/`struct` PNG writer, or copy SE's generator approach). DOCS.md: what it does, first steps, import from Cinema Collections, discovery/manual connection, storage and GC rules, backup notes (renders live in `/media`, outside App backups).
 
 - [ ] **Step 1: Failing test** (port SE `test_app_package.py`: base image, COPY sources exist, entry script mode `100755`, translations parse, PNG magic).
-- [ ] **Step 2–4:** FAIL → implement → PASS; if Docker is available run `docker build --build-arg BUILD_ARCH=amd64 -f app/Dockerfile app`.
+- [ ] **Step 2–4:** FAIL → implement → PASS. The Docker build needs `app/ui` from Track C, so it runs only in Task 22 after the merge (the package test skips the `ui/package.json` assertion when `app/ui` is absent).
 - [ ] **Step 5: Commit** `build(studio): package the Supervisor App`.
 
 ---
@@ -929,7 +993,7 @@ Tests in `tests/integration/`, `pytestmark = pytest.mark.integration`, using `py
 
 **Model:** Luna. **Branch:** `track/integration`.
 
-**Files:** Create `custom_components/cinema_studio/{const,catalog,timing,seasons,history,activation}.py`; Test `tests/integration/test_catalog.py`, `test_seasons.py`, `test_history.py`, `test_activation.py`; Modify `tests/contract/test_season_cases.py` and `tests/contract/test_timing_cases.py` (integration halves).
+**Files:** Create `custom_components/cinema_studio/{const,catalog,seasons,history,activation}.py`; Test `tests/integration/test_catalog.py`, `test_seasons.py`, `test_history.py`, `test_activation.py`; Modify `tests/contract/test_season_cases.py` (integration half).
 
 **Interfaces (Produces):**
 
@@ -947,8 +1011,7 @@ MEDIA_SUBDIR = "cinema-studio"; RENDERS_SUBDIR = "cinema-studio/renders"
 PIN_TTL = timedelta(hours=6)
 LEGACY_DOMAIN = "cinema_collections"
 
-# timing.py — verbatim copy of app/src/cinema_studio/timing.py (Timing, round_timing, timing_problems; no
-#   validate_timing/InvalidError: integration only calls timing_problems and never re-rounds)
+# timing.py — already provided by Task 1; do not edit (integration only calls timing_problems, never re-rounds)
 
 # catalog.py
 @dataclass(frozen=True) class SeasonDef: id; name; color; icon; start: str | None; end: str | None; priority: int; collection_id: str
@@ -991,7 +1054,8 @@ class HistoryState:
     def reset(self, collection_id: str | None, now: datetime) -> list[str]
     @classmethod
     def from_legacy(cls, legacy: Mapping[str, Any], known_clip_ids: set[str]) -> HistoryState
-        # legacy Store payload of cinema_collections; unknown clip ids dropped from played_clip_ids
+        # legacy Store payload of cinema_collections; records copied verbatim incl. period_start (daily-mode
+        # parity); unknown clip ids dropped from played_clip_ids
 
 def order_candidates(clips: Sequence[ClipDef], collection: CollectionDef) -> list[str]
     # random: catalog order; sequential: sorted by (sort_key.casefold(), sort_key, id);
@@ -1033,6 +1097,12 @@ def verify_all(media_root: Path, renders: Iterable[RenderDef]) -> dict[str, bool
 
 # fence.py (blocking)
 class FenceTimeout(Exception): ...
+class FenceCorrupt(Exception): ...          # existing consumer file present but unparseable: never overwritten
+PIN_GRACE = timedelta(minutes=10)           # same margin as App GC
+@dataclass(frozen=True)
+class FenceWriteResult:
+    written: bool                           # False only when before_write returned False
+    pins: dict[str, datetime]               # merged pins as written (unchanged on-disk pins when not written)
 @dataclass
 class ConsumerState:
     consumer_id: str; generation: str; seq: int
@@ -1041,18 +1111,21 @@ class ConsumerFence:
     def __init__(self, media_root: Path, consumer_id: str, generation: str) -> None
     def write(self, *, held_revision: int, held_render_ids: Iterable[str], new_pins: Mapping[str, datetime],
               persisted_pins: Mapping[str, datetime], now: datetime, timeout: float = 5.0,
-              before_write: Callable[[], bool] | None = None) -> dict[str, datetime]
+              before_write: Callable[[], bool] | None = None) -> FenceWriteResult
         # 1. flock(LOCK_EX) consumers/<id>.lock (retry LOCK_NB every 50 ms until timeout → FenceTimeout)
         # 2. flock(LOCK_SH) .gc.lock (same retry; FenceTimeout)
-        # 3. if before_write is given and returns False → release, return {} without writing
+        # 3. read existing file: missing → treat as empty; present but unparseable → release locks and raise
+        #    FenceCorrupt (file left untouched; App GC also halts on it; manager surfaces repair issue
+        #    `consumer_file_corrupt` and selection raises not_ready until a human removes/repairs it)
+        # 4. if before_write is given and returns False → release, return FenceWriteResult(False, existing pins)
         #    (selection uses this to stat-verify the render while GC is excluded)
-        # 4. read existing file (ignore if missing/unparseable), merged pins = union(existing unexpired,
-        #    persisted_pins unexpired, new_pins) keeping the later expires_at; drop pins with expires_at < now
-        # 5. write JSON to <id>.json.tmp, fsync, os.replace, fsync dir; seq += 1
-        # 6. release both locks (reverse order); return merged pins
+        # 5. merged pins = union(existing, persisted_pins, new_pins) keeping the later expires_at; a pin is
+        #    dropped only when expires_at + PIN_GRACE < now (retained through the skew margin)
+        # 6. write JSON to <id>.json.tmp, fsync, os.replace, fsync dir; seq += 1
+        # 7. release both locks (reverse order); return FenceWriteResult(True, merged)
 ```
 
-- [ ] **Step 1: Failing tests** — verify: correct file true; wrong size false; symlink false; path escaping via `..` in relative_path false; directory false; missing false. Fence: write creates file with exact keys; pins merge keeps later expiry and never drops unexpired on-disk pins written by a previous generation; expired pins dropped; `held_render_ids` replaced; `seq` increments; `before_write` returning False writes nothing; another process holding `LOCK_EX` on `.gc.lock` (multiprocessing, 1 s) → `FenceTimeout` with timeout 0.2 and success with timeout 3; two threads writing concurrently with different new pins → final file contains both (serialized by the consumer lock).
+- [ ] **Step 1: Failing tests** — verify: correct file true; wrong size false; symlink false; path escaping via `..` in relative_path false; directory false; missing false. Fence: write creates file with exact keys; pins merge keeps later expiry and never drops unexpired on-disk pins written by a previous generation; pin expired 5 min ago retained, expired 11 min ago dropped; unparseable existing file → `FenceCorrupt` and file bytes unchanged; `before_write` False → `written False`; `held_render_ids` replaced; `seq` increments; `before_write` returning False writes nothing; another process holding `LOCK_EX` on `.gc.lock` (multiprocessing, 1 s) → `FenceTimeout` with timeout 0.2 and success with timeout 3; two threads writing concurrently with different new pins → final file contains both (serialized by the consumer lock).
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(integration): add render verification and flock consumer fence`.
 
@@ -1065,10 +1138,10 @@ class ConsumerFence:
 Port SE `api.py`, `coordinator.py`, `config_flow.py`, `__init__.py` structure, with these changes:
 - `StudioClient(session, host, port, token, consumer_id)` sends `X-Cinema-Consumer`; methods `health()`, `catalog(etag)`, `post_selections(events)`, `legacy_stage(body) -> dict`, `legacy_commit(body) -> dict` (legacy calls use a 30 min timeout).
 - Options flow: `season_entity` (EntitySelector `sensor|input_select|select|input_text`), `scan_interval` (10–3600), `history_reset_mode` (`on_exhaustion|daily`), `history_reset_time` (TimeSelector, default `00:00`).
-- Coordinator `CinemaStudioCoordinator(hass, entry, client, snapshot_store)`: `async_load_snapshot()`; on each new catalog (200): parse (ValueError → keep previous, log, repair issue `invalid_catalog`), then **adoption hook** `await self._on_adopt(catalog)` (set by the manager; must complete before `self.data` changes), then persist raw dict and update data. 304 keeps catalog. Connection error with catalog → `connected=False`; without → `UpdateFailed`; auth → `ConfigEntryAuthFailed`.
-- `async_setup_entry`: client, snapshot `Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.catalog")`, coordinator, manager (Task 14) created **before** first refresh so adoption runs for the snapshot too: `await manager.async_setup()` (loads history/pins/activation, adopts snapshot under the fence, verifies files) → `await coordinator.async_refresh()`; `ConfigEntryNotReady` when no snapshot and refresh failed. Until Task 14 lands, a stub manager with no-op `async_setup` and `async_adopt` is acceptable in this task's tests.
+- Coordinator `CinemaStudioCoordinator(hass, entry, client, snapshot_store)`: `async_load_snapshot()`; on each new catalog (200): parse (ValueError → keep previous, log, repair issue `invalid_catalog`), then `await manager.async_install_snapshot(catalog, raw, persist=self._snapshot.async_save)` (the manager persists and swaps under its lock), and only after it returns update `self.data`. 304 keeps catalog. Connection error with catalog → `connected=False`; without → `UpdateFailed`; auth → `ConfigEntryAuthFailed`.
+- `async_setup_entry`: client, snapshot `Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.catalog")`, coordinator, order: `had_snapshot = await coordinator.async_load_snapshot()` → manager (Task 14) `await manager.async_setup()` (loads history/pins/activation, declares the snapshot under the fence, verifies files) → `await coordinator.async_refresh()`; `ConfigEntryNotReady` when no snapshot and refresh failed. Until Task 14 lands, a stub manager whose `async_install_snapshot` just awaits `persist(raw)` is acceptable in this task's tests.
 
-- [ ] **Step 1: Failing tests** — port SE `test_api.py`, `test_config_flow.py`, `test_init.py` adapted (consumer header present; legacy endpoints; options fields; adoption hook is awaited before `coordinator.data` changes; invalid catalog keeps previous snapshot).
+- [ ] **Step 1: Failing tests** — port SE `test_api.py`, `test_config_flow.py`, `test_init.py` adapted (consumer header present; legacy endpoints; options fields; `async_install_snapshot` is awaited before `coordinator.data` changes and a raising install keeps the previous data; invalid catalog keeps previous snapshot).
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(integration): add studio client, config flow, coordinator and snapshot adoption`.
 
@@ -1086,12 +1159,22 @@ class CinemaStudioManager:
                  *, rng: random.Random | None = None, now: Callable[[], datetime] = dt_util.utcnow) -> None
     async def async_setup(self) -> None
         # load Store f"{DOMAIN}.{entry_id}.state" = {"history":…, "pins":{render_id: iso}, "activation":{…},
-        #   "selection_queue":[…]}; generation = uuid4().hex; adopt current snapshot (async_adopt);
-        # verify all renders (executor); mark ready; register midnight + override/entity listeners
-    async def async_adopt(self, catalog: Catalog) -> None
-        # under self._lock: fence.write(held_revision=catalog.revision, held_render_ids=catalog.render_ids(),
-        #   new_pins={}, persisted_pins=self._pins) in executor; store merged pins; then verify_all for the
-        #   new catalog (executor) → self._verified; FenceTimeout → raise (coordinator keeps old snapshot, retries next poll)
+        #   "selection_queue":[…]}; generation = uuid4().hex; the coordinator has ALREADY loaded the cached
+        #   snapshot (async_load_snapshot runs before manager setup); fence.write(held = snapshot render ids,
+        #   persisted pins) and verify_all; FenceCorrupt → not ready + repair issue; mark ready; register
+        #   midnight + override/entity listeners
+    async def async_install_snapshot(self, catalog: Catalog, raw: dict[str, Any],
+                                     persist: Callable[[dict[str, Any]], Awaitable[None]]) -> None
+        # ONE serialized transition under self._lock (selection waits):
+        #  a. fence.write(held_revision=old.revision, held_render_ids=old ∪ new render ids, new_pins={}, …)
+        #     — protects both snapshots during the switch
+        #  b. verify_all(new catalog) in executor
+        #  c. await persist(raw)   (coordinator's Store.async_save of the raw catalog)
+        #  d. swap: self._catalog = catalog, self._verified = verification map (coordinator data updated by caller
+        #     only after this returns)
+        #  e. fence.write(held_revision=new.revision, held_render_ids=new render ids, …)
+        # Any exception in a–c: nothing swapped, fence still holds old ∪ new (safe superset), exception propagates
+        # (coordinator keeps old snapshot, retries next poll). Exception in e: logged; superset stays (safe).
     @property
     def ready(self) -> bool
     async def async_select(self, *, collection_ref: str | None, season_ref: str | None, dry_run: bool) -> dict[str, Any]
@@ -1105,12 +1188,12 @@ class CinemaStudioManager:
 2. Else collection = season's `collection_id`; candidates = `order_candidates(enabled clips of that collection with verified render)`; empty or collection missing/disabled → fallback to regular season's collection (`season_fallback = True`); still empty → `no_playable_clip`.
 3. Activation (skip when `dry_run` or `season_ref` or `collection_ref`): `evaluate_activation(...)`; reset collection → `history.reset(...)` and `activation_reset = True`.
 4. Loop: `history.pick(...)` → candidate id (None → `no_playable_clip`). Then in executor: `fence.write(..., new_pins={render_id: now + PIN_TTL} if not dry_run else {}, before_write=lambda: verify_render(...))`; `before_write` False → mark unverified, remove from candidates, repeat (max len(candidates)); `FenceTimeout` → `not_ready`. For `dry_run` the fence is still taken (so the verification is equally strong) but no pin is added and nothing is persisted.
-5. Not dry run: `history.commit`, persist state Store with `await store.async_save(...)` **before** returning (no delayed save); append selection event to `selection_queue` (persisted) and schedule a fire-and-forget flush (`client.post_selections`; on success remove sent events); fire `EVENT_SELECTED`.
+5. Not dry run: `history.commit`, update `self._pins` from the fence result, append the selection event to `selection_queue`, then ONE `await store.async_save({history, pins, activation, selection_queue})` **before** returning (no delayed save); after saving schedule a fire-and-forget flush (`client.post_selections`; on success remove sent events and save); fire `EVENT_SELECTED`. A failed save raises (no response returned).
 6. Response dict per the Home Assistant contract; `media_content_id = "media-source://media_source/local/" + render.relative_path`; `relative_output_path = render.relative_path`; `duration_seconds == duration == render.timing.duration`; `output_is_stale == render_pending`; `selection_id = uuid4().hex`; `selected_at` ISO Z.
 
 Actions (`services.py`): `select_next_clip` (`SupportsResponse.OPTIONAL`; fields `collection_id`, `season`, `dry_run`), `reset_history` (`collection_id`), `refresh`, `import_legacy` (`history_only`, Task 15 implements; register here with a handler that calls `manager.legacy.async_run(history_only)`), errors as `ServiceValidationError` with translation keys from the constraints.
 
-- [ ] **Step 1: Failing tests** — `test_contract_response.py`: response validates against `contract/selection_response.schema.json`, `media_content_id` contains `clip_id`; manager: offline (client raising) still selects from snapshot; unverified file (wrong size) skipped and the next candidate returned; all unverified → `no_playable_clip`; GC fence held exclusively by another process → `not_ready`; pins file contains the selected render with 6 h expiry; dry_run writes no pin, no history, no activation; sequential returns first unplayed and exhausts into a new round with `history_reset`; season change resets ordered collection once (`activation_reset` true) and not again after restart (reload entry); per-call `season` doesn't touch activation; fallback to regular when collection empty with `season_fallback`; history persisted before return (Store mock saved); adoption under fence before data swap; selection queue retried after a failed post.
+- [ ] **Step 1: Failing tests** — `test_contract_response.py`: response validates against `contract/selection_response.schema.json`, `media_content_id` contains `clip_id`; manager: offline (client raising) still selects from snapshot; unverified file (wrong size) skipped and the next candidate returned; all unverified → `no_playable_clip`; GC fence held exclusively by another process → `not_ready`; pins file contains the selected render with 6 h expiry; dry_run writes no pin, no history, no activation; sequential returns first unplayed and exhausts into a new round with `history_reset`; season change resets ordered collection once (`activation_reset` true) and not again after restart (reload entry); per-call `season` doesn't touch activation; fallback to regular when collection empty with `season_fallback`; history persisted before return (Store mock saved); snapshot install is one transition (selection blocked during it; failure keeps old catalog and superset fence); corrupt consumer file → `not_ready` + repair issue; selection queue retried after a failed post.
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(integration): add fenced, offline selection manager and actions`.
 
@@ -1134,7 +1217,7 @@ Steps:
 3. Seasons block: from `input_datetime.party_halloween_inicio/_fin` and `party_christmas_inicio/_fin` states (`YYYY-MM-DD` → `MM-DD`) when present: `halloween` (priority 10, collection `halloween` if a Worker collection with that id exists else `regular`), `christmas` (priority 20, collection `christmas` if exists else `regular`), plus `regular` → `regular`.
 4. Roots: `{"source": "/media/cinema-collections/source", "compiled": "/media/cinema-collections/compiled"}` (production defaults, also readable from the legacy status payload when it exposes them).
 5. `history_only=False`: `client.legacy_stage({"phase": "stage", "manifest": …})` → re-fetch `/api/v1/clips` → `client.legacy_commit({"phase": "commit", "run_id", "clips": refetched})` → `await coordinator.async_request_refresh()` and wait until the catalog revision ≥ the report's revision (max 60 s).
-6. History (both modes): load `Store(hass, 1, f"cinema_collections.{legacy_entry.entry_id}.playback_history")` read-only; `HistoryState.from_legacy(data, known_clip_ids=catalog clip ids)`; replace the manager's history for the legacy collection ids present; seed activation with the current effective season/collection (no reset); persist.
+6. History (both modes): copy the legacy entry options `history_reset_mode` / `history_reset_time` into this entry's options when they differ from defaults (`hass.config_entries.async_update_entry`); load `Store(hass, 1, f"cinema_collections.{legacy_entry.entry_id}.playback_history")` read-only (records keep `period_start`, `round_number`, `played_clip_ids`, `last_selected_clip_id`, `last_reset_at`, `reset_pending`); `HistoryState.from_legacy(data, known_clip_ids=catalog clip ids)`; replace the manager's history for the legacy collection ids present; seed activation with the current effective season/collection (no reset); persist.
 7. Return report (+ `history_collections` count). Fires a persistent notification summarizing counts.
 
 - [ ] **Step 1: Failing tests** — `aioclient_mock` legacy Worker + studio endpoints: full run calls stage then commit with re-fetched clips; bearer from entry data and never present in the returned dict or logs (`caplog`); missing legacy entry error; seasons built from input_datetime states; history imported with unknown ids dropped and activation seeded so the next selection doesn't reset; `history_only` skips stage/commit.
@@ -1172,7 +1255,7 @@ All UI work under `app/ui/`, built into `app/src/cinema_studio/static/ui` by the
 
 Changes:
 - `style.css`: `--color-accent: #f59e0b; --color-accent-soft: #f59e0b33; --color-accent-ink: #111111;` (rest as SE).
-- `api/types.ts`: exactly the Shared API Reference types. `api/client.ts`: `ui = { state, token, rotateToken, settings, collections{list,create,update,remove,order}, seasons{list,create,update,remove,resolve}, normProfiles{list,create,update,remove,apply}, procProfiles{list,create,update,remove}, assets{list,upload(file),remove}, clips{list,get,update,putRecipe,preview,rerender,remove,bulk,test}, uploads{create,chunk,complete}, jobs, gcRun }`; `mediaUrl(id, kind: "original"|"preview"|"render", bust?)` → `api/ui/clips/${id}/${kind}`; `posterUrl(id, bust?)`, `filmstripUrl(id, index, bust?)`.
+- `api/types.ts`: exactly the Shared API Reference types. `api/client.ts`: `ui = { state, token, rotateToken, settings, collections{list,create,update,remove,order}, seasons{list,create,update,remove,resolve}, normProfiles{list,create,update,remove,apply}, procProfiles{list,create,update,remove}, assets{list,upload(file),remove}, clips{list,get,update,putRecipe,preview,rerender,remove,bulk,test,replaceSource}, uploads{create,chunk,complete}, jobs, gcRun }`; `mediaUrl(id, kind: "original"|"preview"|"render", bust?)` → `api/ui/clips/${id}/${kind}`; `posterUrl(id, bust?)`, `filmstripUrl(id, index, bust?)`.
 - `lib/format.ts`: keep SE formatters; `formatDuration(154.133)` → `"2:34.1"`; add `formatTimecode(seconds)` → `"00:02:34.133"`.
 - `lib/recipe.ts`: `defaultRecipe(settings)`, `validateRecipe(r, original)` returning i18n keys for every server rule in Task 9, `recipesEqual`, `trimmedLength(r, duration)`.
 - `lib/filters.ts`: `ClipFilter = {collectionId, seasonId, query, status}`; `filterClips` (accent-insensitive title/source_name), `loudnessSpread(clips)` over `render.integrated_lufs`.
@@ -1244,7 +1327,7 @@ Layout (route `/clips/:id`, full-screen `Sheet` on phones, two-column ≥ lg):
 2. **FilmstripTimeline** — thumbnails from `filmstrip.json` laid out across the width; trim handles (pointer + keyboard: arrows nudge one frame/0.01 s, shift ×10); playhead synced with the video (`requestAnimationFrame`); click to seek; region outside trim dimmed; margin indicators (lead/tail) drawn as black blocks before/after the trimmed region; numeric fields for trim start/end (timecode).
 3. **TransportBar** — play/pause (space), loop trimmed region, jump to in/out, current timecode / trimmed length.
 4. **Edit panel** — fades in/out (null = "Use profile (1.0 s / 1.5 s)" checkbox), gain dB slider, loudness profile picker (None = processing profile target), margins lead/tail (0–10 s), collection, title, enabled, notes.
-5. **Render panel** — published render info (r<n>, duration, content start/end, LUFS, timing source, published date), pending/rendering status with job progress, `needs_source` and missing-asset warnings.
+5. **Render panel** — published render info (r<n>, duration, content start/end, LUFS, timing source, published date), pending/rendering status with job progress, missing-asset warning (link to Organize → Assets), and for `needs_source` a "Replace source file" button (file picker → chunked upload → `clips.replaceSource(id, upload_id)`). The filmstrip and trim fields are on the original's timeline.
 6. **Footer actions** — "Preview render" (queues preview → plays it in VideoStage when done), "Test on device" (`TestDeviceDialog`: targets from settings, source preview/render, sends `clips.test`; empty targets → link to System), "Save & render" (disabled when unchanged or invalid; shows server validation errors), unsaved-changes guard.
 
 - [ ] **Step 1: Failing tests** — timeline math (round trips, clamping, frame snap at 24 fps), crop math (clamp, even values, display↔source round trip within 2 px, aspect lock), editor view with mocked client: Save disabled when unchanged, enabled after trim change, sends `putRecipe` with crop in source pixels; invalid trim shows problem and disables Save; Test on device posts selected target.

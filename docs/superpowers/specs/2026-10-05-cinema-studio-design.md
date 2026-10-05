@@ -120,7 +120,9 @@ Root `/media/cinema-studio/` (App maps `media:rw`; HA core sees it as
 - `consumers/<consumer_id>.json` + `.lock` — written by the integration (see GC).
 - `.gc.lock` — `flock` fence between App GC and integration selection.
 - `.work/` — temp, previews, thumbnails staging (not published).
-- Posters/filmstrips live in `/data/thumbs/<clip_id>/r<n>/` (App only).
+- Thumbnails (App only): `/data/thumbs/<clip_id>/original/` (poster + filmstrip of
+  the original timeline, used by the editor) and `/data/thumbs/<clip_id>/r<n>/poster.jpg`
+  (poster of each published render).
 
 Publication sequence (one worker, in-process queue, ported from Clips):
 
