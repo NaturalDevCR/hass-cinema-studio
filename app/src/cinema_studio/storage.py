@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,32 @@ def _component(value: str) -> str:
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise InvalidError("invalid path component")
     return value
+
+
+def validate_contained_path(path: Path, root: Path) -> None:
+    """Reject symlinks from root down and paths outside its real location."""
+    try:
+        relative = path.relative_to(root)
+        if ".." in relative.parts:
+            raise ValueError("path traversal")
+        current = root
+        for part in ("", *relative.parts):
+            if part:
+                current = current / part
+            if current.is_symlink():
+                raise ValueError("symlink component")
+        if not path.resolve().is_relative_to(root.resolve()):
+            raise ValueError("path escapes root")
+    except (ValueError, OSError, RuntimeError) as error:
+        raise InvalidError(f"unsafe media path: {path}") from error
+
+
+def _sync_directory(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _remove(path: Path) -> None:
@@ -51,7 +78,16 @@ class MediaStore:
             self.paths.consumers_dir,
             self.paths.work_dir,
         ):
-            directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+            self._ensure_directory(directory)
+
+    def _ensure_directory(self, directory: Path) -> None:
+        validate_contained_path(directory, self.paths.media_dir)
+        directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+        validate_contained_path(directory, self.paths.media_dir)
+
+    def _validate_write(self, path: Path, root: Path) -> None:
+        validate_contained_path(root, self.paths.media_dir)
+        validate_contained_path(path, root)
 
     def staging_path(self, job_id: str, name: str) -> Path:
         # Import staging uses import/<run_id> beneath the work root.
@@ -59,13 +95,24 @@ class MediaStore:
         for part in parts:
             _component(part)
         path = self.paths.work_dir.joinpath(*parts) / _component(name)
-        path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        self._validate_write(path, self.paths.work_dir)
+        self._ensure_directory(path.parent)
         return path
 
     def publish_file(self, staged: Path, clip_id: str, n: int) -> tuple[str, Path]:
         _component(clip_id)
         directory = self.paths.renders_dir / clip_id
-        directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+        self._validate_write(directory, self.paths.renders_dir)
+        self._ensure_directory(self.paths.renders_dir)
+        try:
+            directory.mkdir(mode=0o755)
+        except FileExistsError:
+            self._ensure_directory(directory)
+        else:
+            _sync_directory(self.paths.renders_dir)
+        validate_contained_path(staged, self.paths.media_dir)
+        if not stat.S_ISREG(staged.lstat().st_mode):
+            raise InvalidError("staged render must be a regular file")
         with staged.open("rb") as source:
             os.fsync(source.fileno())
         for _ in range(5):
@@ -75,11 +122,7 @@ class MediaStore:
                 os.link(staged, final)
             except FileExistsError:
                 continue
-            fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            _sync_directory(directory)
             staged.unlink()
             return render_uuid, final
         raise FileExistsError("render UUID collision after 5 attempts")
@@ -90,7 +133,8 @@ class MediaStore:
     def store_original(self, src: Path, clip_id: str, filename: str, *, link: bool) -> Path:
         name = _component(filename.replace("\\", "/").rsplit("/", 1)[-1])
         destination = self.paths.originals_dir / _component(clip_id) / name
-        destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        self._validate_write(destination, self.paths.originals_dir)
+        self._ensure_directory(destination.parent)
         if link:
             try:
                 os.link(src, destination)
@@ -129,21 +173,25 @@ class MediaStore:
         return shutil.disk_usage(self.paths.media_dir).free
 
     def is_network_fs(self) -> bool:
-        target = self.paths.media_dir.resolve()
-        best = -1
-        filesystem = ""
+        targets = (self.paths.renders_dir, self.paths.consumers_dir, self.paths.gc_lock_path)
         try:
             lines = Path("/proc/mounts").read_text().splitlines()
         except FileNotFoundError:
             return False
-        for line in lines:
-            fields = line.split()
-            if len(fields) < 3:
-                continue
-            mount = Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[1]))
-            if target.is_relative_to(mount) and len(mount.parts) > best:
-                best, filesystem = len(mount.parts), fields[2]
-        return filesystem in {"nfs", "nfs4", "cifs", "smb3", "fuse.sshfs"}
+        for location in targets:
+            target = location.resolve()
+            best = -1
+            filesystem = ""
+            for line in lines:
+                fields = line.split()
+                if len(fields) < 3:
+                    continue
+                mount = Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[1]))
+                if target.is_relative_to(mount) and len(mount.parts) > best:
+                    best, filesystem = len(mount.parts), fields[2]
+            if filesystem in {"nfs", "nfs4", "cifs", "smb3", "fuse.sshfs"}:
+                return True
+        return False
 
     def estimate_render_bytes(self, profile: ProcessingProfile, seconds: float) -> int:
         video = profile.video

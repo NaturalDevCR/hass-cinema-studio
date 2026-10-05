@@ -159,3 +159,74 @@ def test_network_mount(paths, monkeypatch, filesystem, expected):
 
     monkeypatch.setattr(Path, "read_text", mounts)
     assert MediaStore(paths).is_network_fs() is expected
+
+
+@pytest.mark.parametrize(
+    "operation,component",
+    [
+        ("stage", "work"),
+        ("stage", "job"),
+        ("publish", "renders"),
+        ("publish", "clip"),
+        ("original", "originals"),
+        ("original", "clip"),
+    ],
+)
+def test_reject_symlinked_write_directories(paths, operation, component):
+    store = MediaStore(paths)
+    store.ensure_dirs()
+    staged = paths.media_dir / "source.mp4"
+    staged.write_bytes(b"video")
+    outside = paths.media_dir / "outside"
+    outside.mkdir()
+    clip = str(uuid4())
+    if operation == "stage":
+        target = paths.work_dir if component == "work" else paths.work_dir / "job"
+    elif operation == "publish":
+        target = paths.renders_dir if component == "renders" else paths.renders_dir / clip
+    else:
+        target = paths.originals_dir if component == "originals" else paths.originals_dir / clip
+    if target.exists():
+        target.rmdir()
+    target.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(InvalidError):
+        if operation == "stage":
+            store.staging_path("job", "video.mp4")
+        elif operation == "publish":
+            store.publish_file(staged, clip, 1)
+        else:
+            store.store_original(staged, clip, "video.mp4", link=True)
+    assert list(outside.iterdir()) == []
+    assert staged.read_bytes() == b"video"
+
+
+def test_publication_syncs_new_clip_parent(paths, monkeypatch):
+    import stat
+
+    store = MediaStore(paths)
+    store.ensure_dirs()
+    staged = store.staging_path("job", "video.mp4")
+    staged.write_bytes(b"video")
+    synced = []
+    real_sync = os.fsync
+
+    def sync(fd):
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            synced.append(info.st_ino)
+        real_sync(fd)
+
+    monkeypatch.setattr(os, "fsync", sync)
+    _, final = store.publish_file(staged, str(uuid4()), 1)
+    assert synced == [paths.renders_dir.stat().st_ino, final.parent.stat().st_ino]
+
+
+@pytest.mark.parametrize("location", ["renders_dir", "consumers_dir", "gc_lock_path"])
+def test_nested_network_mount(paths, monkeypatch, location):
+    from pathlib import Path
+
+    target = getattr(paths, location)
+    monkeypatch.setattr(
+        Path, "read_text", lambda *a, **k: f"root / ext4 rw 0 0\nserver {target} nfs4 rw 0 0\n"
+    )
+    assert MediaStore(paths).is_network_fs()

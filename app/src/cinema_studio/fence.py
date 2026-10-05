@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
+import os
+import stat
 import time
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 from .config import Paths
+from .errors import InvalidError
+from .models import RenderRecord
 from .repository import Repository
-from .storage import MediaStore
+from .storage import RENDER_NAME, MediaStore, validate_contained_path
+
+_LOGGER = logging.getLogger(__name__)
 
 CONSUMER_FILE = "{consumer_id}.json"
 
@@ -102,7 +110,9 @@ class GcFence:
     def read_consumers(self) -> tuple[dict[str, ConsumerFile], list[str]]:
         parsed: dict[str, ConsumerFile] = {}
         failed: list[str] = []
-        for path in sorted(self.paths.consumers_dir.glob("*.json")):
+        with os.scandir(self.paths.consumers_dir) as entries:
+            files = sorted(Path(entry.path) for entry in entries if entry.name.endswith(".json"))
+        for path in files:
             try:
                 data: object = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
@@ -133,11 +143,29 @@ class GarbageCollector:
     ) -> None:
         self.paths, self.repo, self.fence, self.store, self.now = paths, repo, fence, store, now
 
+    def _candidate_path(self, record: RenderRecord) -> Path | None:
+        path = self.paths.media_dir / record.relative_path
+        try:
+            match = RENDER_NAME.fullmatch(path.name)
+            expected = f"cinema-studio/renders/{record.clip_id}/{path.name}"
+            if match is None or match["clip"] != record.clip_id or record.relative_path != expected:
+                raise ValueError("noncanonical render path")
+            validate_contained_path(path, self.paths.renders_dir)
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("render is not a regular file")
+        except (ValueError, InvalidError, OSError):
+            _LOGGER.warning("Skipping unsafe render %s: %s", record.id, record.relative_path)
+            return None
+        return path
+
     def run(self) -> GcResult:
         if self.store.is_network_fs():
             return GcResult([], "network filesystem")
         with self.fence.exclusive():
-            consumers, failed = self.fence.read_consumers()
+            try:
+                consumers, failed = self.fence.read_consumers()
+            except OSError as error:
+                return GcResult([], f"cannot read consumers directory: {error}")
             if failed:
                 return GcResult([], "unparseable consumer files: " + ", ".join(failed))
             missing = [cid for cid, _ in self.repo.list_consumers_seen() if cid not in consumers]
@@ -156,7 +184,9 @@ class GarbageCollector:
             for record in self.repo.list_renders(states={"retired", "unrecognized"}):
                 if record.id in protected:
                     continue
-                path = self.paths.media_dir / record.relative_path
+                path = self._candidate_path(record)
+                if path is None:
+                    continue
                 if record.state == "retired":
                     if record.retired_at is None:
                         continue

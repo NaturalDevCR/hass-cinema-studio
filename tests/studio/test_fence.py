@@ -183,3 +183,128 @@ def test_process_lock(paths):
             process.terminate()
             process.join()
     assert process.exitcode == 0
+
+
+@pytest.mark.parametrize("protection", ["held", "pin"])
+def test_second_consumer_protects(paths, monkeypatch, protection):
+    store = MediaStore(paths)
+    store.ensure_dirs()
+    monkeypatch.setattr(store, "is_network_fs", lambda: False)
+    with closing(Database(paths.database_path)) as db:
+        repo = Repository(db)
+        record = make_render(make_clip(repo))
+        path = paths.media_dir / record.relative_path
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"keep")
+        repo.add_unrecognized_render(
+            render_id=record.id,
+            clip_id=record.clip_id,
+            relative_path=record.relative_path,
+            size=4,
+            mtime_iso=NOW.isoformat(),
+        )
+        timestamp = (NOW - timedelta(hours=49)).timestamp()
+        os.utime(path, (timestamp, timestamp))
+        (paths.consumers_dir / "entry.json").write_text(json.dumps(consumer()))
+        second = consumer(
+            held=[record.id] if protection == "held" else [],
+            pins=[dict(render_id=record.id, expires_at=(NOW + timedelta(hours=1)).isoformat())]
+            if protection == "pin"
+            else [],
+        )
+        second["consumer_id"] = "second"
+        (paths.consumers_dir / "second.json").write_text(json.dumps(second))
+        result = GarbageCollector(paths, repo, GcFence(paths), store).run()
+        assert result.deleted == [] and result.halted_reason is None
+        assert path.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "absolute",
+        "traversal",
+        "wrong_clip",
+        "wrong_name",
+        "parent_symlink",
+        "file_symlink",
+        "directory",
+    ],
+)
+def test_invalid_candidate_kept(paths, monkeypatch, caplog, kind):
+    store = MediaStore(paths)
+    store.ensure_dirs()
+    monkeypatch.setattr(store, "is_network_fs", lambda: False)
+    with closing(Database(paths.database_path)) as db:
+        repo = Repository(db)
+        record = make_render(make_clip(repo))
+        outside = paths.media_dir / "outside"
+        outside.mkdir()
+        relative = record.relative_path
+        if kind == "absolute":
+            relative = str(outside / "video.mp4")
+        elif kind == "traversal":
+            relative = "cinema-studio/renders/../../outside/video.mp4"
+        elif kind == "wrong_clip":
+            relative = relative.replace(record.clip_id + "/", "wrong/")
+        elif kind == "wrong_name":
+            relative = relative.rsplit("/", 1)[0] + "/video.mp4"
+        path = paths.media_dir / relative
+        if kind == "parent_symlink":
+            path.parent.symlink_to(outside, target_is_directory=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "file_symlink":
+            target = outside / "video.mp4"
+            target.write_bytes(b"keep")
+            path.symlink_to(target)
+        elif kind == "directory":
+            path.mkdir()
+        else:
+            path.write_bytes(b"keep")
+        repo.add_unrecognized_render(
+            render_id=record.id,
+            clip_id=record.clip_id,
+            relative_path=relative,
+            size=4,
+            mtime_iso=NOW.isoformat(),
+        )
+        timestamp = (NOW - timedelta(hours=49)).timestamp()
+        os.utime(path, (timestamp, timestamp))
+        result = GarbageCollector(paths, repo, GcFence(paths), store).run()
+        assert result.deleted == [] and result.halted_reason is None
+        assert path.exists()
+        assert repo.get_render(record.id).state == "unrecognized"
+        assert "Skipping unsafe render" in caplog.text
+
+
+def test_unreadable_consumers_halts(paths, monkeypatch):
+    store = MediaStore(paths)
+    store.ensure_dirs()
+    monkeypatch.setattr(store, "is_network_fs", lambda: False)
+    real_scandir = os.scandir
+
+    def scandir(path):
+        if path == paths.consumers_dir:
+            raise PermissionError("unreadable consumers")
+        return real_scandir(path)
+
+    with closing(Database(paths.database_path)) as db:
+        repo = Repository(db)
+        record = make_render(make_clip(repo))
+        path = paths.media_dir / record.relative_path
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"keep")
+        repo.add_unrecognized_render(
+            render_id=record.id,
+            clip_id=record.clip_id,
+            relative_path=record.relative_path,
+            size=4,
+            mtime_iso=NOW.isoformat(),
+        )
+        timestamp = (NOW - timedelta(hours=49)).timestamp()
+        os.utime(path, (timestamp, timestamp))
+        monkeypatch.setattr(os, "scandir", scandir)
+        result = GarbageCollector(paths, repo, GcFence(paths), store).run()
+        assert result.halted_reason and result.deleted == []
+        assert path.read_bytes() == b"keep"
