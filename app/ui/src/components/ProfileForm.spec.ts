@@ -16,6 +16,7 @@ import { beforeEach, it, expect, vi } from "vitest";
 import ProfileForm from "./ProfileForm.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
+import { useJobs } from "@/composables/useJobs";
 import { ui } from "@/api/client";
 import { makeNormProfile } from "@/test/factories";
 beforeEach(() => {
@@ -85,4 +86,23 @@ it("names every profile slider and announces the formatted values from the numbe
   await w.get('[data-test="true_peak"]').setValue("-2");
   expect(sliders[1]!.attributes("aria-valuetext")).toBe("−2.0 dBTP");
   w.unmount();
+});
+
+it("does not create a duplicate when the post-save refresh fails and the form is submitted again", async () => {
+  const profile = makeNormProfile({ id: "fresh", name: "Fresh" });
+  const create = vi.spyOn(ui.normProfiles, "create").mockResolvedValue(profile);
+  const update = vi.spyOn(ui.normProfiles, "update").mockResolvedValue({ profile, affected_clip_ids: [] });
+  vi.mocked(useJobs().refresh).mockRejectedValueOnce(new Error("offline"));
+  const w = mount(ProfileForm);
+  await w.get('[data-test="name"]').setValue("Fresh");
+  await w.get("form").trigger("submit");
+  await flushPromises();
+  expect(w.emitted("saved")).toHaveLength(1);
+  expect(w.find('[role="alert"]').exists()).toBe(false);
+  await w.get("form").trigger("submit");
+  await flushPromises();
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(update).toHaveBeenCalledWith("fresh", expect.objectContaining({ name: "Fresh" }));
+  create.mockRestore();
+  update.mockRestore();
 });

@@ -28,6 +28,8 @@ const controls = [
   },
   { key: "lra", label: "lra", min: 1, max: 20, step: 0.5, format: (n: number) => `${n.toFixed(1)} LU` },
 ] as const;
+// After a successful create the form becomes an editor of that profile, so a retry cannot create a duplicate.
+const current = ref(props.profile);
 const pending = ref(false);
 const error = ref<string | null>(null);
 watch(pending, (value) => emit("busy", value), { flush: "sync" });
@@ -54,10 +56,17 @@ async function submit(): Promise<void> {
   try {
     const body = { name: name.value.trim(), ...values.value };
     // The server marks the affected clips pending and queues their renders on PATCH.
-    const { profile, affected_clip_ids } = props.profile
-      ? await ui.normProfiles.update(props.profile.id, body)
-      : { profile: await ui.normProfiles.create(body), affected_clip_ids: [] as string[] };
-    await Promise.all([useStudio().refresh(), useJobs().refresh()]);
+    let affected_clip_ids: string[] = [];
+    if (current.value) {
+      const result = await ui.normProfiles.update(current.value.id, body);
+      current.value = result.profile;
+      affected_clip_ids = result.affected_clip_ids;
+    } else {
+      current.value = await ui.normProfiles.create(body);
+    }
+    const profile = current.value;
+    // Best effort: the profile is saved, so a failed refresh must not read as a failed save.
+    await Promise.allSettled([useStudio().refresh(), useJobs().refresh()]);
     useToast().push(t("organize.saved"), "success");
     if (affected_clip_ids.length) {
       useToast().push(tp("profile.rerendering", affected_clip_ids.length), "success");

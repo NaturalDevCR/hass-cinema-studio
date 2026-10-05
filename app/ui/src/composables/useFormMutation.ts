@@ -14,7 +14,8 @@ export function useFormMutation() {
     error.value = null;
     try {
       const result = await action();
-      await useStudio().refresh();
+      // The change is already saved: a failed refresh must not turn this into an error the user retries.
+      await Promise.allSettled([useStudio().refresh()]);
       useToast().push(translate("organize.saved"), "success");
       saved(result);
     } catch (cause) {
