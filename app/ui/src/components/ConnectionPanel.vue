@@ -7,7 +7,7 @@ import { useStudio } from "@/composables/useStudio";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import { useI18n } from "@/i18n";
-const props = defineProps<{ state: State }>();
+defineProps<{ state: State }>();
 const { t } = useI18n();
 const token = ref<string | null>(null);
 const tokenField = ref<HTMLInputElement | null>(null);
@@ -54,10 +54,10 @@ async function action(work: () => Promise<void>) {
     pending.value = false;
   }
 }
-async function copy(kind: "token" | "host") {
+async function copy() {
   await action(async () => {
     const text = await fetchToken();
-    if (!text || disposed) return;
+    if (disposed) return;
     if (await copyText(text)) useToast().push(t("system.copied"), "success");
     else {
       manual.value = true;
@@ -82,7 +82,7 @@ async function rotate() {
       return;
     hide();
     await ui.rotateToken();
-    await useStudio().refresh();
+    await useStudio().refresh({ force: true });
     useToast().push(t("system.rotated"), "success");
   });
 }
@@ -124,7 +124,7 @@ onBeforeUnmount(() => {
         <button data-test="reveal-token" class="btn min-h-11!" :disabled="pending" @click="reveal">
           {{ token ? t("system.hide") : t("system.reveal") }}
         </button>
-        <button data-test="copy-token" class="btn min-h-11!" :disabled="pending" @click="copy('token')">
+        <button data-test="copy-token" class="btn min-h-11!" :disabled="pending" @click="copy">
           {{ t("system.copy") }}
         </button>
         <button

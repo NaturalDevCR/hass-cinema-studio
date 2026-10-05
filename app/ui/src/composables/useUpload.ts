@@ -2,6 +2,7 @@ import { ref, watch, type Ref } from "vue";
 import { ApiError, messageOf, ui } from "@/api/client";
 import type { Clip, UploadComplete } from "@/api/types";
 import { translate } from "@/i18n";
+import { newId } from "@/lib/id";
 import { useStudio } from "./useStudio";
 import { useJobs } from "./useJobs";
 
@@ -19,7 +20,6 @@ export const UPLOAD_EXTENSIONS = [".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm
 const items: Ref<UploadItem[]> = ref([]);
 const busy = ref(false);
 const studio = useStudio();
-let seq = 0;
 let run: Promise<void> | null = null;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -99,7 +99,7 @@ function add(files: FileList | File[]): void {
   for (const file of Array.from(files)) {
     const error = validateUploadFile(file);
     items.value.push({
-      id: `upload-${++seq}-${Date.now().toString(36)}`,
+      id: newId("upload"),
       file,
       status: error ? "error" : "pending",
       progress: 0,
