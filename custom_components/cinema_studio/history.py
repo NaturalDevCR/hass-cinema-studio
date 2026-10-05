@@ -70,12 +70,14 @@ class HistoryState:
         reset_mode: str,
         reset_time: time,
     ) -> tuple[str | None, int, bool, dict[str, Any] | None]:
+        """Pick without mutation; ``now`` must be local and aware (use ``dt_util.as_local``)."""
         if now.tzinfo is None:
             raise ValueError("history requires timezone-aware datetime")
         ids = list(dict.fromkeys(x for x in eligible if x))
         record = self._data["collections"].get(collection_id)
         period = _period_start(now, reset_time)
         reset = False
+        daily_reset = False
         if record is None:
             round_number, played = 1, []
         else:
@@ -85,6 +87,7 @@ class HistoryState:
                 round_number += 1
                 played = []
                 reset = True
+                daily_reset = True
             reset = reset or bool(record.get("reset_pending", False))
         remaining = [x for x in ids if x not in played]
         if ids and not remaining:
@@ -101,7 +104,7 @@ class HistoryState:
             "played_clip_ids": [*played, clip_id],
             "last_selected_clip_id": clip_id,
             "last_reset_at": now.isoformat()
-            if reset and record
+            if daily_reset
             else (record.get("last_reset_at") if record else None),
             "reset_pending": False,
         }
@@ -113,9 +116,7 @@ class HistoryState:
             "played_clip_ids": list(record["played_clip_ids"]),
         }
 
-    def reset(
-        self, collection_id: str | None, now: datetime, *, reset_time: time = time(0, 0)
-    ) -> list[str]:
+    def reset(self, collection_id: str | None, now: datetime, *, reset_time: time) -> list[str]:
         ids = (
             sorted(self._data["collections"])
             if collection_id is None

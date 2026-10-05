@@ -198,9 +198,10 @@ def _parse_clip(data: Mapping[str, Any]) -> ClipDef:
         raise ValueError("render timing must be finite")
     timing = Timing(*map(float, vals))
     path = _get(r, "relative_path", str, "render")
+    segments = path.split("/")
     if (
         "\\" in path
-        or ".." in path.split("/")
+        or any(segment in {"", ".", ".."} for segment in segments)
         or not path.startswith(f"cinema-studio/renders/{clip_id}/")
     ):
         raise ValueError("render path is unsafe or outside clip directory")

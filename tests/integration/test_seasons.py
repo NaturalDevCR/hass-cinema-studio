@@ -36,5 +36,15 @@ def test_effective_season_precedence_and_entity_name(catalog_payload: dict) -> N
         **(base | {"action_season": None, "entity_state": "Halloween"})
     ) == ("halloween", "entity")
     assert resolve_effective_season(**(base | {"action_season": None})) == ("halloween", "calendar")
+    for ignored in ("unknown", "unavailable", ""):
+        assert resolve_effective_season(
+            **(base | {"action_season": None, "entity_state": ignored})
+        ) == ("halloween", "calendar")
+    assert resolve_effective_season(
+        **(base | {"action_season": None, "override": "missing", "entity_state": "Halloween"})
+    ) == ("halloween", "entity")
+    assert resolve_effective_season(
+        **(base | {"action_season": None, "override": "missing", "entity_state": "unknown"})
+    ) == ("halloween", "calendar")
     with pytest.raises(UnknownSeasonError):
         resolve_effective_season(**(base | {"action_season": "missing"}))

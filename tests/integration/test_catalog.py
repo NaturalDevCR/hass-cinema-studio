@@ -31,6 +31,13 @@ def test_parse_catalog_and_find_collection(catalog_payload: dict) -> None:
         lambda c: c["clips"][0]["render"].update(
             relative_path="cinema-studio\\renders\\clip-a\\x.mp4"
         ),
+        lambda c: c["clips"][0]["render"].update(
+            relative_path="cinema-studio/renders/clip-a//x.mp4"
+        ),
+        lambda c: c["clips"][0]["render"].update(
+            relative_path="cinema-studio/renders/clip-a/./x.mp4"
+        ),
+        lambda c: c["clips"][0]["render"].update(relative_path="cinema-studio/renders/clip-a/"),
     ],
 )
 def test_bad_contract_fails_or_bad_clip_is_dropped(mutate, catalog_payload: dict) -> None:

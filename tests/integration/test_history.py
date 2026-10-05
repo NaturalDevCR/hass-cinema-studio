@@ -75,7 +75,7 @@ def test_random_round_is_no_repeat_and_collections_are_independent() -> None:
     assert other[0] == "a" and other[1] == 1
 
 
-def test_removed_clip_does_not_end_round_and_reappearing_clip_joins() -> None:
+def test_removed_clip_does_not_end_round() -> None:
     history = HistoryState()
     first = history.pick(
         "c",
@@ -126,6 +126,18 @@ def test_order_candidates_custom_keeps_rest_sequential() -> None:
     collection = CollectionDef("c", "C", "", "", "custom", ("b",), True)
     clips = [ClipDef(x, "c", x, "", True, x, False, None) for x in ("z", "b", "a")]
     assert order_candidates(clips, collection) == ["b", "a", "z"]
+
+
+def test_order_candidates_random_catalog_order_and_sequential_tiebreak() -> None:
+    clips = [
+        ClipDef("B", "c", "", "", True, "a", False, None),
+        ClipDef("a", "c", "", "", True, "A", False, None),
+        ClipDef("A", "c", "", "", True, "A", False, None),
+    ]
+    random_collection = CollectionDef("c", "C", "", "", "random", (), True)
+    sequential_collection = CollectionDef("c", "C", "", "", "sequential", (), True)
+    assert order_candidates(clips, random_collection) == ["B", "a", "A"]
+    assert order_candidates(clips, sequential_collection) == ["A", "a", "B"]
 
 
 def test_daily_reset_respects_boundary_and_sets_reset_pending() -> None:
@@ -181,13 +193,27 @@ def test_reset_supports_one_or_all_collections() -> None:
     state = HistoryState(
         {
             "collections": {
-                key: {"period_start": "2026-08-27", "round_number": 1, "played_clip_ids": []}
+                key: {
+                    "period_start": "2026-08-27",
+                    "round_number": 1,
+                    "played_clip_ids": ["clip"],
+                }
                 for key in ("a", "b")
             }
         }
     )
-    assert state.reset("a", NOW) == ["a"]
-    assert state.reset(None, NOW) == ["a", "b"]
+    assert state.reset("a", NOW, reset_time=time()) == ["a"]
+    record_a = state.to_dict()["collections"]["a"]
+    assert record_a["round_number"] == 2
+    assert record_a["reset_pending"] is True
+    assert record_a["played_clip_ids"] == []
+    assert state.reset(None, NOW, reset_time=time()) == ["a", "b"]
+    records = state.to_dict()["collections"]
+    assert records["a"]["round_number"] == 3
+    assert records["b"]["round_number"] == 2
+    for record in records.values():
+        assert record["reset_pending"] is True
+        assert record["played_clip_ids"] == []
 
 
 def test_custom_order_is_used_by_pick() -> None:
@@ -292,7 +318,7 @@ def test_reset_pending_is_reported_and_cleared_in_new_record() -> None:
     assert picked[3] is not None and picked[3]["reset_pending"] is False
 
 
-def test_pick_mode_switch_does_not_reconcile_daily_record() -> None:
+def test_pick_mode_switch_uses_random_after_sequential_history() -> None:
     history = HistoryState(
         {
             "collections": {
@@ -303,10 +329,65 @@ def test_pick_mode_switch_does_not_reconcile_daily_record() -> None:
     picked = history.pick(
         "c",
         ["a", "b"],
-        "sequential",
-        random.Random(),
+        "random",
+        random.Random(0),
         now=NOW,
         reset_mode="exhaustion",
         reset_time=time(4),
     )
     assert picked[0] == "b" and picked[1] == 1 and picked[2] is False
+
+
+def test_exhaustion_rollover_preserves_last_reset_at() -> None:
+    previous_reset = "2026-08-20T12:00:00+00:00"
+    state = HistoryState(
+        {
+            "collections": {
+                "c": {
+                    "period_start": "2026-08-27",
+                    "round_number": 1,
+                    "played_clip_ids": ["a"],
+                    "last_reset_at": previous_reset,
+                }
+            }
+        }
+    )
+    picked = state.pick(
+        "c",
+        ["a"],
+        "sequential",
+        random.Random(),
+        now=NOW,
+        reset_mode="exhaustion",
+        reset_time=time(),
+    )
+    assert picked[2] is True
+    assert picked[3] is not None and picked[3]["last_reset_at"] == previous_reset
+
+
+def test_reset_pending_preserves_last_reset_at() -> None:
+    previous_reset = "2026-08-20T12:00:00+00:00"
+    state = HistoryState(
+        {
+            "collections": {
+                "c": {
+                    "period_start": "2026-08-27",
+                    "round_number": 2,
+                    "played_clip_ids": [],
+                    "last_reset_at": previous_reset,
+                    "reset_pending": True,
+                }
+            }
+        }
+    )
+    picked = state.pick(
+        "c",
+        ["a"],
+        "sequential",
+        random.Random(),
+        now=NOW,
+        reset_mode="exhaustion",
+        reset_time=time(),
+    )
+    assert picked[2] is True
+    assert picked[3] is not None and picked[3]["last_reset_at"] == previous_reset
