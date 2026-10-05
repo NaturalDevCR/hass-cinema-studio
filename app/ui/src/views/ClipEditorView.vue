@@ -288,7 +288,7 @@ async function revert() {
             {{ t("clipEditor.pending") }}
           </p>
           <div v-for="job in activeJobs" :key="job.id">
-            <span>{{ job.kind }}</span
+            <span>{{ t(`jobs.kind.${job.kind}`) }}</span
             ><progress class="w-full" :value="job.progress" max="1" />
           </div>
           <RouterLink

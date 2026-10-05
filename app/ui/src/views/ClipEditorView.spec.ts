@@ -380,3 +380,13 @@ it("hides the raw file input behind a button", async () => {
   await w.get("[data-test=replace-source]").trigger("click");
   expect(click).toHaveBeenCalled();
 });
+it("labels an active job with its translated kind, not the raw value", async () => {
+  const w = await setup();
+  useJobs().jobs.value = [{ ...previewJob, id: "j1", kind: "legacy_import", status: "running" }];
+  await flushPromises();
+  expect(w.text()).toContain("Legacy import");
+  expect(w.text()).not.toContain("legacy_import");
+  useI18n().setLocale("es");
+  await flushPromises();
+  expect(w.text()).toContain("Importación heredada");
+});

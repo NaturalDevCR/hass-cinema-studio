@@ -19,6 +19,26 @@ describe("ClipCard", () => {
     expect(wrapper.emitted("select")?.[0]).toEqual(["film"]);
   });
 
+  it("shows the poster again once thumbnails appear after it failed to load", async () => {
+    const wrapper = mount(ClipCard, { props: { clip: makeClip({ id: "film", has_thumbs: false }) } });
+    const first = wrapper.get("img").attributes("src");
+    await wrapper.get("img").trigger("error");
+    expect(wrapper.find("img").exists()).toBe(false);
+    await wrapper.setProps({ clip: makeClip({ id: "film", has_thumbs: true }) });
+    expect(wrapper.find("img").exists()).toBe(true);
+    expect(wrapper.get("img").attributes("src")).not.toBe(first);
+  });
+
+  it("shows the poster again when the render changes after a failure", async () => {
+    const wrapper = mount(ClipCard, { props: { clip: makeClip({ id: "film" }) } });
+    const first = wrapper.get("img").attributes("src");
+    await wrapper.get("img").trigger("error");
+    expect(wrapper.find("img").exists()).toBe(false);
+    const next = makeClip({ id: "film" });
+    await wrapper.setProps({ clip: { ...next, render: { ...next.render!, id: "another-render" } } });
+    expect(wrapper.get("img").attributes("src")).not.toBe(first);
+  });
+
   describe("long press and inline preview", () => {
     const touch = { pointerType: "touch" } as const;
     beforeEach(() => vi.useFakeTimers());

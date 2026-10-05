@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { onMounted } from "vue";
 import ConnectionPanel from "@/components/ConnectionPanel.vue";
 import DefaultsPanel from "@/components/DefaultsPanel.vue";
 import GcPanel from "@/components/GcPanel.vue";
@@ -10,6 +11,8 @@ import { useStudio } from "@/composables/useStudio";
 import { useI18n } from "@/i18n";
 const { t } = useI18n();
 const { state, loaded, loading, error, refresh } = useStudio();
+// State loaded earlier (e.g. before any render existed) is stale by now: refetch on every visit.
+onMounted(() => void refresh({ force: true }));
 </script>
 
 <template>

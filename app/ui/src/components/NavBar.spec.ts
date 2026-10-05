@@ -41,6 +41,24 @@ describe("NavBar", () => {
     expect(wrapper.findAll('a[aria-current="page"]').map((l) => l.text())).toEqual(["Library"]);
   });
 
+  it("follows navigation between sections, including back to Library", async () => {
+    const { wrapper, router } = await mountNav("/system");
+    const current = () => wrapper.findAll('a[aria-current="page"]').map((l) => l.text());
+    expect(current()).toEqual(["System"]);
+    await router.push("/");
+    await flushPromises();
+    expect(current()).toEqual(["Library"]);
+    await router.push("/clips/abc");
+    await flushPromises();
+    expect(current()).toEqual(["Library"]);
+    await router.push("/organize");
+    await flushPromises();
+    expect(current()).toEqual(["Organize"]);
+    await router.push({ name: "library" });
+    await flushPromises();
+    expect(current()).toEqual(["Library"]);
+  });
+
   it("switches language", async () => {
     const { wrapper } = await mountNav();
     const spanish = wrapper.findAll("button").find((b) => b.attributes("lang") === "es")!;

@@ -61,6 +61,16 @@ beforeEach(() => {
 });
 afterEach(() => { usePlayer().stop(); document.body.innerHTML = ""; vi.useRealTimers(); });
 
+describe("LibraryView toolbar", () => {
+  it("lets the search input take the remaining width instead of the selects", async () => {
+    const { wrapper } = await mountLibrary();
+    for (const select of wrapper.findAll('select[aria-label="Filter by status"], select[aria-label="Filter by season"]')) {
+      expect(select.classes()).toEqual(expect.arrayContaining(["sm:w-48", "sm:flex-none"]));
+    }
+    expect(wrapper.get('input[type="search"]').classes()).toEqual(expect.arrayContaining(["min-w-0", "flex-1"]));
+  });
+});
+
 describe("LibraryView search", () => {
   it("does not overwrite typed text when another filter changes the route during the debounce", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
