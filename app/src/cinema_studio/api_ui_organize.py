@@ -9,12 +9,13 @@ import re
 import secrets
 import shutil
 import unicodedata
+from collections.abc import Callable
 from datetime import date as date_type
 from pathlib import Path
-from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
+from starlette.datastructures import UploadFile
 from starlette.responses import Response
 
 from . import __version__
@@ -53,6 +54,7 @@ router = APIRouter(prefix="/api/ui")
 ASSET_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".m4v"})
 _REGULAR = "regular"
 _UPLOAD_CHUNK = 1024 * 1024
+_MULTIPART_OVERHEAD = 64 * 1024
 _MAX_NAME_LENGTH = 200
 _UNSAFE_NAME_CHARS = re.compile(r"[^\w.\- ]+")
 
@@ -178,6 +180,11 @@ async def list_collections(request: Request) -> list[Collection]:
     return _repo(request).list_collections()
 
 
+@router.get("/collections/{collection_id}", response_model=Collection)
+async def get_collection(collection_id: str, request: Request) -> Collection:
+    return _repo(request).get_collection(collection_id)
+
+
 @router.post("/collections", response_model=Collection)
 async def create_collection(data: CollectionCreate, request: Request) -> Collection:
     return _repo(request).create_collection(data)
@@ -219,6 +226,28 @@ async def list_seasons(request: Request) -> list[Season]:
     return _repo(request).list_seasons()
 
 
+@router.get("/seasons/resolve")
+async def resolve_season(date: str, request: Request) -> dict[str, str]:
+    try:
+        parsed = date_type.fromisoformat(date)
+    except ValueError:
+        raise InvalidError("Date must use YYYY-MM-DD format.") from None
+    if parsed.isoformat() != date:
+        raise InvalidError("Date must use YYYY-MM-DD format.")
+    repo = _repo(request)
+    season_id = resolve_calendar_season(repo.list_seasons(), parsed)
+    return {
+        "date": date,
+        "season_id": season_id,
+        "collection_id": repo.get_season(season_id).collection_id,
+    }
+
+
+@router.get("/seasons/{season_id}", response_model=Season)
+async def get_season(season_id: str, request: Request) -> Season:
+    return _repo(request).get_season(season_id)
+
+
 @router.post("/seasons", response_model=Season)
 async def create_season(data: SeasonCreate, request: Request) -> Season:
     return _repo(request).create_season(data)
@@ -236,23 +265,6 @@ async def delete_season(season_id: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail="The regular season cannot be deleted.")
     repo.delete_season(season_id)
     return Response(status_code=204)
-
-
-@router.get("/seasons/resolve")
-async def resolve_season(date: str, request: Request) -> dict[str, str]:
-    try:
-        parsed = date_type.fromisoformat(date)
-    except ValueError:
-        raise InvalidError("Date must use YYYY-MM-DD format.") from None
-    if parsed.isoformat() != date:
-        raise InvalidError("Date must use YYYY-MM-DD format.")
-    repo = _repo(request)
-    season_id = resolve_calendar_season(repo.list_seasons(), parsed)
-    return {
-        "date": date,
-        "season_id": season_id,
-        "collection_id": repo.get_season(season_id).collection_id,
-    }
 
 
 # --- normalization profiles ------------------------------------------------------------------
@@ -385,39 +397,80 @@ async def list_assets(request: Request) -> list[Asset]:
     return _repo(request).list_assets()
 
 
+def _declared_length_exceeds(request: Request, limit: int) -> bool:
+    """Whether Content-Length already says the body is over the limit (plus multipart framing)."""
+    try:
+        declared = int(request.headers.get("content-length", ""))
+    except ValueError:
+        return False  # absent or chunked: the post-spool check still applies
+    return declared > limit + _MULTIPART_OVERHEAD
+
+
+def _publish_asset_row(repo: Repository, name: str, size: int, sha256: str) -> Callable[[], None]:
+    """Create or update the asset row and return a callable that undoes exactly that change."""
+    try:
+        previous: Asset | None = repo.get_asset(name)
+    except NotFoundError:
+        previous = None
+    if previous is None:
+        repo.create_asset(Asset(filename=name, size=size, sha256=sha256, status="ready"))
+        return lambda: repo.delete_asset(name)
+    repo.update_asset(name, AssetUpdate(size=size, sha256=sha256, status="ready"))
+    restore = AssetUpdate(size=previous.size, sha256=previous.sha256, status=previous.status)
+
+    def undo() -> None:
+        repo.update_asset(name, restore)
+
+    return undo
+
+
 @router.post("/assets")
-async def upload_asset(request: Request, file: Annotated[UploadFile, File()]) -> dict[str, object]:
+async def upload_asset(request: Request) -> dict[str, object]:
     state = request.app.state
     repo = _repo(request)
     store: MediaStore = state.store
-    name = _safe_asset_name(file.filename)
-    if Path(name).suffix.lower() not in ASSET_EXTENSIONS:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported file type; use one of {', '.join(sorted(ASSET_EXTENSIONS))}.",
-        )
     limit = repo.get_settings().max_upload_mb * 1024 * 1024
-    staged = store.staging_path(f"asset-{secrets.token_hex(6)}", name)
+    if _declared_length_exceeds(request, limit):  # before Starlette spools the body to disk
+        raise HTTPException(status_code=413, detail="The file exceeds the upload limit.")
+    form = await request.form()
     try:
-        await _stage_upload(file, staged, limit)
+        file = form.get("file")
+        if not isinstance(file, UploadFile):
+            raise InvalidError("A file is required.")
+        name = _safe_asset_name(file.filename)
+        if Path(name).suffix.lower() not in ASSET_EXTENSIONS:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported file type; use one of {', '.join(sorted(ASSET_EXTENSIONS))}.",
+            )
+        staged = store.staging_path(f"asset-{secrets.token_hex(6)}", name)
         try:
-            info = await probe(staged)
-        except MediaError:
-            raise InvalidError("The file is not a readable video.") from None
-        if not info.valid or info.duration <= 0:
-            raise InvalidError("The file is not a readable video.")
-        sha256 = await file_sha256(staged)
-        size = staged.stat().st_size
-        target = _asset_path(request, name)
-        await asyncio.to_thread(os.replace, staged, target)
+            await _stage_upload(file, staged, limit)
+            try:
+                info = await probe(staged)
+            except MediaError:
+                raise InvalidError("The file is not a readable video.") from None
+            if not info.valid or info.duration <= 0:
+                raise InvalidError("The file is not a readable video.")
+            sha256 = await file_sha256(staged)
+            size = staged.stat().st_size
+            target = _asset_path(request, name)
+            # Row first: a database failure leaves the published file and row untouched. If the
+            # file then cannot be published, the row change is undone.
+            undo = _publish_asset_row(repo, name, size, sha256)
+            try:
+                await asyncio.to_thread(os.replace, staged, target)
+            except BaseException:
+                try:
+                    undo()
+                except Exception:
+                    _LOGGER.exception("Could not restore the asset row for %s", name)
+                raise
+        finally:
+            shutil.rmtree(staged.parent, ignore_errors=True)
     finally:
-        shutil.rmtree(staged.parent, ignore_errors=True)
-    try:
-        repo.get_asset(name)
-    except NotFoundError:
-        asset = repo.create_asset(Asset(filename=name, size=size, sha256=sha256, status="ready"))
-    else:
-        asset = repo.update_asset(name, AssetUpdate(size=size, sha256=sha256, status="ready"))
+        await form.close()
+    asset = repo.get_asset(name)
     return {"asset": asset, "affected_clip_ids": _jobs(request).on_asset_changed(name)}
 
 

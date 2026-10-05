@@ -374,6 +374,15 @@ def test_collection_crud_order_and_conflicts(ingress: TestClient, repo: Reposito
     assert ingress.delete("/api/ui/collections/kids").status_code == 404
 
 
+def test_collection_get_by_id(ingress: TestClient, repo: Repository):
+    repo.create_collection(CollectionCreate(id="movies", name="Movies"))
+    response = ingress.get("/api/ui/collections/movies")
+    assert response.status_code == 200
+    assert response.json()["id"] == "movies"
+    assert ingress.get("/api/ui/collections/regular").status_code == 200
+    assert ingress.get("/api/ui/collections/ghost").status_code == 404
+
+
 def test_collection_delete_conflicts_with_seasons_and_protects_regular(
     ingress: TestClient, repo: Repository
 ):
@@ -481,6 +490,10 @@ def test_season_crud_resolve_and_regular_restrictions(ingress: TestClient, repo:
         response = ingress.get("/api/ui/seasons/resolve", params={"date": bad})
         assert response.status_code == 422, bad
     assert ingress.get("/api/ui/seasons/resolve").status_code == 422
+
+    assert ingress.get("/api/ui/seasons/christmas").json() == patched.json()
+    assert ingress.get("/api/ui/seasons/regular").json()["builtin"] is True
+    assert ingress.get("/api/ui/seasons/ghost").status_code == 404
 
     assert ingress.delete("/api/ui/seasons/regular").status_code == 400
     assert ingress.patch("/api/ui/seasons/regular", json={"start": "01-01"}).status_code == 422
@@ -771,6 +784,97 @@ def test_asset_upload_enforces_the_upload_limit(
     assert response.status_code == 413
     assert ingress.get("/api/ui/assets").json() == []
     assert [p for p in paths.work_dir.rglob("*") if p.is_file()] == []
+
+
+def test_asset_upload_rejects_an_oversized_content_length_before_spooling(
+    ingress: TestClient, monkeypatch: pytest.MonkeyPatch, paths: Paths
+):
+    body = settings_body(ingress)
+    body["max_upload_mb"] = 1
+    assert ingress.put("/api/ui/settings", json=body).status_code == 200
+    parsed: list[bool] = []
+
+    async def spy(self: object, *args: object, **kwargs: object) -> object:
+        parsed.append(True)
+        raise AssertionError("the multipart body must not be parsed")
+
+    monkeypatch.setattr("starlette.requests.Request.form", spy)
+    response = ingress.post(
+        "/api/ui/assets",
+        content=b"\0" * (2 * 1024 * 1024),
+        headers={"Content-Type": "multipart/form-data; boundary=x"},
+    )
+    assert response.status_code == 413
+    assert parsed == []
+    assert ingress.get("/api/ui/assets").json() == []
+    assert [p for p in paths.work_dir.rglob("*") if p.is_file()] == []
+
+
+def test_asset_replacement_keeps_old_bytes_and_row_when_the_db_write_fails(
+    ingress: TestClient,
+    repo: Repository,
+    paths: Paths,
+    make_video: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    first = make_video("a.mp4", seconds=1.0).read_bytes()
+    second = make_video("b.mp4", seconds=2.0).read_bytes()
+    assert upload(ingress, "outro.mp4", first).status_code == 200
+    before = repo.get_asset("outro.mp4")
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(Repository, "update_asset", boom)
+    with pytest.raises(RuntimeError):
+        upload(ingress, "outro.mp4", second)
+    monkeypatch.undo()
+    assert (paths.assets_dir / "outro.mp4").read_bytes() == first
+    assert repo.get_asset("outro.mp4") == before
+    assert [p for p in paths.work_dir.rglob("*") if p.is_file()] == []
+
+
+def test_new_asset_leaves_no_file_when_the_db_write_fails(
+    ingress: TestClient,
+    repo: Repository,
+    paths: Paths,
+    make_video: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    data = make_video("a.mp4", seconds=1.0).read_bytes()
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(Repository, "create_asset", boom)
+    with pytest.raises(RuntimeError):
+        upload(ingress, "fresh.mp4", data)
+    monkeypatch.undo()
+    assert not (paths.assets_dir / "fresh.mp4").exists()
+    assert repo.list_assets() == []
+
+
+def test_asset_replacement_restores_the_row_when_publishing_the_file_fails(
+    ingress: TestClient,
+    repo: Repository,
+    paths: Paths,
+    make_video: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    first = make_video("a.mp4", seconds=1.0).read_bytes()
+    second = make_video("b.mp4", seconds=2.0).read_bytes()
+    assert upload(ingress, "outro.mp4", first).status_code == 200
+    before = repo.get_asset("outro.mp4")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(api_ui_organize.os, "replace", boom)
+    with pytest.raises(OSError):
+        upload(ingress, "outro.mp4", second)
+    monkeypatch.undo()
+    assert (paths.assets_dir / "outro.mp4").read_bytes() == first
+    assert repo.get_asset("outro.mp4") == before
 
 
 def test_asset_delete_conflicts_with_a_referencing_profile(
