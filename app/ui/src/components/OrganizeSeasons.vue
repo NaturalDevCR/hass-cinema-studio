@@ -6,6 +6,7 @@ import EmptyState from "./EmptyState.vue";
 import { useI18n } from "@/i18n";
 import SeasonTimeline from "./SeasonTimeline.vue";
 import SeasonBadge from "./SeasonBadge.vue";
+import { useStudio } from "@/composables/useStudio";
 defineProps<{ seasons: Season[]; pending: boolean; actingId?: string | null }>();
 const emit = defineEmits<{
   create: [];
@@ -13,6 +14,7 @@ const emit = defineEmits<{
   remove: [value: Season];
 }>();
 const { t } = useI18n();
+const { collectionById } = useStudio();
 </script>
 <template>
   <header class="mb-4 flex flex-wrap items-center justify-between gap-2">
@@ -35,7 +37,10 @@ const { t } = useI18n();
     <li v-for="season in seasons" :key="season.id" class="rounded-lg border border-line bg-ground p-3">
       <div class="min-w-0">
         <SeasonBadge class="max-w-full [&>span:last-child]:min-w-0 [&>span:last-child]:truncate" :season="season" />
-        <p v-if="season.start" class="mt-2 text-xs text-muted">
+        <p class="mt-2 text-xs text-muted">
+          {{ t("organize.playsCollection", { name: collectionById(season.collection_id)?.name ?? season.collection_id }) }}
+        </p>
+        <p v-if="season.start" class="mt-1 text-xs text-muted">
           {{ season.start }} → {{ season.end }} · {{ t("season.priority") }}
           {{ season.priority }}
         </p>

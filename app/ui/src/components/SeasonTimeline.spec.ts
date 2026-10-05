@@ -1,7 +1,8 @@
 import { mount, flushPromises } from "@vue/test-utils";
 import { describe, it, expect, vi } from "vitest";
 import SeasonTimeline from "./SeasonTimeline.vue";
-import { makeSeason } from "@/test/factories";
+import { makeCollection, makeSeason } from "@/test/factories";
+import { useStudio } from "@/composables/useStudio";
 import { ui } from "@/api/client";
 describe("SeasonTimeline", () => {
   it("draws wrap-around ranges as two segments and October as one; regular is excluded", () => {
@@ -42,6 +43,22 @@ describe("SeasonTimeline", () => {
     resolve.mockRestore();
   });
 });
+it("shows the collection that the resolved season plays", async () => {
+  useStudio().collections.value = [makeCollection({ id: "horror", name: "Horror" })];
+  const resolve = vi
+    .spyOn(ui.seasons, "resolve")
+    .mockResolvedValue({ date: "2026-10-31", season_id: "oct", collection_id: "horror" });
+  const w = mount(SeasonTimeline, {
+    props: { seasons: [makeSeason({ id: "oct", name: "Halloween", start: "10-01", end: "10-31", collection_id: "horror" })] },
+  });
+  await w.get('input[type="date"]').setValue("2026-10-31");
+  await flushPromises();
+  const result = w.get('[data-test="probe-result"]');
+  expect(result.text()).toContain("Halloween");
+  expect(result.text()).toContain("Plays Horror");
+  resolve.mockRestore();
+});
+
 it("ignores stale date results and presents resolve errors inline", async () => {
   let finish!: (value: { date: string; season_id: string; collection_id: string }) => void;
   const resolve = vi

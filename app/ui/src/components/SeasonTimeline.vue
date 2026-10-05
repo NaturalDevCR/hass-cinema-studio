@@ -3,9 +3,11 @@ import { computed, ref, useId } from "vue";
 import type { Season } from "@/api/types";
 import { messageOf, ui } from "@/api/client";
 import { useI18n, type MessageKey } from "@/i18n";
+import { useStudio } from "@/composables/useStudio";
 import SeasonBadge from "./SeasonBadge.vue";
 const props = withDefaults(defineProps<{ seasons: Season[]; showLegend?: boolean }>(), { showLegend: true });
 const { t } = useI18n();
+const { collectionById } = useStudio();
 const id = useId();
 const months = Array.from({ length: 12 }, (_, index) => index + 1);
 const monthName = (month: number) => t(`month.${month}` as MessageKey);
@@ -36,7 +38,7 @@ const today = new Date();
 const todayDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 const todayPosition = (ordinal(todayDate.slice(5)) / 366) * 100;
 const probe = ref("");
-const result = ref<string | null>(null);
+const result = ref<{ season_id: string; collection_id: string } | null>(null);
 const pending = ref(false);
 const error = ref<string | null>(null);
 let request = 0;
@@ -51,14 +53,15 @@ async function resolve(): Promise<void> {
   pending.value = true;
   try {
     const response = await ui.seasons.resolve(probe.value);
-    if (current === request) result.value = response.season_id;
+    if (current === request) result.value = response;
   } catch (cause) {
     if (current === request) error.value = messageOf(cause);
   } finally {
     if (current === request) pending.value = false;
   }
 }
-const resolved = computed(() => props.seasons.find((s) => s.id === result.value));
+const resolved = computed(() => props.seasons.find((s) => s.id === result.value?.season_id));
+const resolvedCollection = computed(() => collectionById(result.value?.collection_id));
 </script>
 <template>
   <div class="min-w-0 space-y-4">
@@ -125,7 +128,11 @@ const resolved = computed(() => props.seasons.find((s) => s.id === result.value)
       <input :id="id" v-model="probe" type="date" class="field min-w-0" @change="resolve" />
       <div aria-live="polite" class="mt-2 min-h-6 text-sm">
         <span v-if="pending" role="status" class="text-muted">{{ t("common.loading") }}</span
-        ><SeasonBadge v-else-if="resolved" :season="resolved" />
+        ><span v-else-if="resolved" data-test="probe-result" class="flex flex-wrap items-center gap-2"
+          ><SeasonBadge :season="resolved" /><span class="text-muted">{{
+            t("organize.playsCollection", { name: resolvedCollection?.name ?? result?.collection_id ?? "" })
+          }}</span></span
+        >
       </div>
       <p v-if="error" role="alert" class="text-sm break-words text-danger">
         {{ error }}
