@@ -10,7 +10,7 @@ from dataclasses import asdict
 from datetime import datetime, time, timedelta
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from homeassistant.core import HomeAssistant
@@ -44,6 +44,7 @@ from .fence import (
     _iso,  # pyright: ignore[reportPrivateUsage]
 )
 from .history import HistoryState, order_candidates
+from .legacy import LegacyImport
 from .seasons import UnknownSeasonError, resolve_effective_season
 from .verify import verify_all, verify_render
 
@@ -54,18 +55,12 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-class LegacyRunner(Protocol):
-    async def async_run(self, history_only: bool) -> Any: ...
-
-
 def _error(key: str) -> ServiceValidationError:
     return ServiceValidationError(translation_domain=DOMAIN, translation_key=key)
 
 
 class CinemaStudioManager:
     """Serialize catalog adoption, verification, selection, and persistence."""
-
-    legacy: LegacyRunner
 
     def __init__(
         self,
@@ -99,6 +94,36 @@ class CinemaStudioManager:
         self._reverify_fence_failed = False
         self._listeners_registered = False
         self.override_season: str | None = None
+        self.legacy = LegacyImport(hass, self, client)
+
+    @property
+    def catalog_revision(self) -> int:
+        return self._catalog.revision
+
+    async def async_import_history(self, data: dict[str, Any], collection_ids: set[str]) -> int:
+        """Merge imported records and seed activation without resetting history."""
+        async with self._lock:
+            imported = HistoryState.from_legacy(
+                data, known_clip_ids={clip.id for clip in self._catalog.clips}
+            ).to_dict()["collections"]
+            history = self._history.to_dict()
+            records = {
+                key: value
+                for key, value in imported.items()
+                if key in collection_ids and self._catalog.find_collection(key) is not None
+            }
+            history["collections"].update(records)
+            previous_history, previous_activation = self._history, self._activation
+            self._history = HistoryState(history)
+            season, _ = self._resolve(None)
+            collection, _, _ = self._collection(season)
+            self._activation = ActivationState(season, collection.id if collection else None)
+            try:
+                await self._store.async_save(self._state())
+            except Exception:
+                self._history, self._activation = previous_history, previous_activation
+                raise
+            return len(records)
 
     @property
     def ready(self) -> bool:

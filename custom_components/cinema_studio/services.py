@@ -40,8 +40,6 @@ async def async_register_services(hass: HomeAssistant) -> None:
 
     async def legacy(call: ServiceCall) -> None:
         manager = _entry(hass).runtime_data.manager
-        if not hasattr(manager, "legacy"):
-            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="not_ready")
         await manager.legacy.async_run(call.data["history_only"])
 
     registrations = (
