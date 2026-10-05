@@ -115,7 +115,7 @@ def make_render(
 
 
 def test_seeds(repo: Repository, db: Database) -> None:
-    assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert db.connection.execute("PRAGMA user_version").fetchone()[0] == 2
     collection = repo.get_collection("regular")
     assert collection.model_dump() == {
         "id": "regular",
@@ -157,16 +157,32 @@ def test_seeds(repo: Repository, db: Database) -> None:
     assert repo.catalog_revision() == 0
 
 
+def test_migration_drops_consumers_that_never_fetched_a_catalog(tmp_path: Path) -> None:
+    path = tmp_path / "studio.db"
+    first = Database(path)
+    repo = Repository(first)
+    repo.touch_consumer("config-flow", None)
+    repo.touch_consumer("never-fetched", None)
+    repo.touch_consumer("real-entry", 4)
+    first.connection.execute("PRAGMA user_version = 1")
+    first.close()
+    reopened = Database(path)
+    seen = Repository(reopened).list_consumers_seen()
+    assert [consumer_id for consumer_id, _ in seen] == ["real-entry"]
+    assert reopened.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    reopened.close()
+
+
 def test_database_reopen_keeps_data_and_rejects_newer_schema(tmp_path: Path) -> None:
     path = tmp_path / "studio.db"
     first = Database(path)
     Repository(first).create_collection(CollectionCreate(name="Trailers"))
-    first.connection.execute("PRAGMA user_version = 2")
+    first.connection.execute("PRAGMA user_version = 3")
     first.close()
     with pytest.raises(RuntimeError, match="newer"):
         Database(path)
     raw = sqlite3.connect(path)
-    raw.execute("PRAGMA user_version = 1")
+    raw.execute("PRAGMA user_version = 2")
     raw.close()
     reopened = Database(path)
     assert [c.id for c in Repository(reopened).list_collections()] == ["regular", "trailers"]

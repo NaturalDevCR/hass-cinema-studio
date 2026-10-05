@@ -182,12 +182,26 @@ def test_a_blank_or_unsafe_consumer_id_is_rejected(client: TestClient, auth: dic
         assert response.status_code == 422, value
 
 
-def test_every_route_records_the_consumer(app: FastAPI, client: TestClient, auth: dict[str, str]):
-    assert client.get("/api/v1/health", headers=auth).status_code == 200
-    assert consumers(app) == {CONSUMER: None}
+def test_only_the_catalog_route_records_the_consumer(
+    app: FastAPI, client: TestClient, auth: dict[str, str]
+):
     other = {**auth, "X-Cinema-Consumer": "entry-2"}
+    assert client.get("/api/v1/health", headers=auth).status_code == 200
     assert client.post("/api/v1/selections", json={"events": []}, headers=other).status_code == 204
-    assert set(consumers(app)) == {CONSUMER, "entry-2"}
+    assert client.post("/api/v1/import/legacy", content="{nope", headers=other).status_code == 422
+    assert consumers(app) == {}
+    assert client.get("/api/v1/catalog", headers=auth).status_code == 200
+    assert consumers(app) == {CONSUMER: None}
+
+
+def test_the_config_flow_health_probe_does_not_halt_gc(
+    app: FastAPI, client: TestClient, auth: dict[str, str]
+):
+    probe = {**auth, "X-Cinema-Consumer": "config-flow"}
+    assert client.get("/api/v1/health", headers=probe).status_code == 200
+    app.state.store.ensure_dirs()
+    result = app.state.gc.run()
+    assert result.halted_reason is None
 
 
 # --- health ----------------------------------------------------------------------------------
@@ -321,12 +335,12 @@ def test_a_request_without_a_validator_keeps_the_known_held_revision(
     assert consumers(app) == {CONSUMER: revision}
 
 
-def test_every_route_reads_the_held_revision_from_if_none_match(
+def test_the_catalog_route_reads_the_held_revision_from_if_none_match(
     app: FastAPI, client: TestClient, auth: dict[str, str], repo: Repository
 ):
     publish_clip(repo)
     revision = repo.catalog_revision()
-    client.get("/api/v1/health", headers={**auth, "If-None-Match": f'"rev-{revision}"'})
+    client.get("/api/v1/catalog", headers={**auth, "If-None-Match": f'"rev-{revision}"'})
     assert consumers(app) == {CONSUMER: revision}
 
 

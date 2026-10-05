@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .models import DEFAULT_PROCESSING_PROFILE_ID, Settings
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = (
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -117,7 +117,15 @@ class Database:
                 for statement in _SCHEMA:
                     conn.execute(statement)
                 _seed(conn)
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version < 2:
+                # Version 1 registered a consumer on every call, including the config flow's
+                # synthetic ``config-flow`` health probe, which never writes a fence file and so
+                # halted garbage collection. Only catalog fetches register consumers now.
+                conn.execute(
+                    "DELETE FROM consumers_seen WHERE consumer_id = 'config-flow'"
+                    " OR held_revision IS NULL"
+                )
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def _seed(conn: sqlite3.Connection) -> None:

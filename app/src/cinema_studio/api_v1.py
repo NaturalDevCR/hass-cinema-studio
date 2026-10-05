@@ -21,13 +21,21 @@ _REVISION_ETAG = re.compile(r'"rev-([0-9]{1,15})"')
 _CONSUMER_ID = r"^[A-Za-z0-9_-]{1,128}$"
 
 
-async def record_consumer(
-    request: Request,
+async def validate_consumer(
     consumer_id: Annotated[
         str, Header(alias="X-Cinema-Consumer", pattern=_CONSUMER_ID, description="Config entry id")
     ],
-) -> None:
-    """Note that this consumer called, and which catalog revision it says it holds.
+) -> str:
+    """Require a well-formed consumer header on every route; it is not recorded here."""
+    return consumer_id
+
+
+def _record_consumer(request: Request, consumer_id: str) -> None:
+    """Note that this consumer fetched the catalog, and which revision it says it holds.
+
+    Only the catalog route registers a consumer: that is what makes the integration write a
+    ``consumers/<id>.json`` fence file, so probes (the config flow's health check) must not
+    register, or the garbage collector would wait for a file that is never written.
 
     The revision is the ``"rev-<n>"`` validator in ``If-None-Match``: it is what the integration
     has adopted, so the garbage collector can tell which retired renders are still referenced.
@@ -39,9 +47,9 @@ async def record_consumer(
 
 
 # ``require_bearer`` is listed first so an unauthenticated request is answered 401 before the
-# consumer header is validated or recorded.
+# consumer header is validated.
 router = APIRouter(
-    prefix="/api/v1", dependencies=[Depends(require_bearer), Depends(record_consumer)]
+    prefix="/api/v1", dependencies=[Depends(require_bearer), Depends(validate_consumer)]
 )
 
 
@@ -56,8 +64,11 @@ async def health(request: Request) -> dict[str, str | int]:
 
 
 @router.get("/catalog")
-async def catalog(request: Request) -> Response:
+async def catalog(
+    request: Request, consumer_id: Annotated[str, Depends(validate_consumer)]
+) -> Response:
     repo: Repository = request.app.state.repo
+    _record_consumer(request, consumer_id)
     current = _etag(repo.catalog_revision())
     if _etag_matches(request.headers.get("If-None-Match", ""), current):
         return Response(status_code=304, headers={"ETag": current})
