@@ -1,0 +1,605 @@
+"""Entry lifecycle, catalog refresh, and persisted offline recovery."""
+
+from datetime import timedelta
+from unittest.mock import patch
+
+import pytest
+from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_REAUTH, ConfigEntryState
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.service_info.hassio import HassioServiceInfo
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
+
+from custom_components.cinema_studio import CinemaStudioRuntime
+from custom_components.cinema_studio.const import DOMAIN, EVENT_CATALOG_CHANGED, STORAGE_VERSION
+
+pytestmark = pytest.mark.integration
+BASE = "http://studio:8099/api/v1"
+HEALTH = {"status": "ok", "version": "1.2.3", "api_version": 1, "instance_id": "studio-id"}
+
+
+@pytest.fixture
+def entry(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"host": "studio", "port": 8099, "token": "secret"},
+        unique_id="studio-id",
+        options={"scan_interval": 45},
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+def snapshot(hass_storage, entry, catalog_payload, etag='"rev-7"'):
+    hass_storage[f"{DOMAIN}.{entry.entry_id}.catalog"] = {
+        "version": STORAGE_VERSION,
+        "minor_version": 1,
+        "key": f"{DOMAIN}.{entry.entry_id}.catalog",
+        "data": {"etag": etag, "catalog": catalog_payload},
+    }
+
+
+def online(aioclient_mock, catalog_payload):
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json=catalog_payload, headers={"ETag": '"rev-7"'})
+
+
+async def test_online_setup_and_unload(hass, entry, aioclient_mock, hass_storage, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert isinstance(entry.runtime_data, CinemaStudioRuntime)
+    state = entry.runtime_data.coordinator.data
+    assert state.catalog.revision == 4
+    assert state.connected
+    assert state.last_sync is not None
+    assert state.app_version == "1.2.3"
+    assert entry.runtime_data.manager is not None
+    assert entry.runtime_data.coordinator.update_interval == timedelta(seconds=45)
+    assert hass_storage[f"{DOMAIN}.{entry.entry_id}.catalog"]["data"] == {
+        "etag": '"rev-7"',
+        "catalog": catalog_payload,
+    }
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert entry.state is ConfigEntryState.NOT_LOADED
+    count = aioclient_mock.call_count
+    hass.bus.async_fire(EVENT_CATALOG_CHANGED)
+    await hass.async_block_till_done()
+    assert aioclient_mock.call_count == count
+
+
+async def test_offline_snapshot(hass, entry, aioclient_mock, hass_storage, catalog_payload):
+    snapshot(hass_storage, entry, catalog_payload)
+    aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.LOADED
+    state = entry.runtime_data.coordinator.data
+    assert state.catalog.revision == 4
+    assert not state.connected
+    assert state.last_sync is None
+    assert state.app_version is None
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_offline_without_snapshot(hass, entry, aioclient_mock):
+    aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_catalog_event(hass, entry, aioclient_mock, hass_storage, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    changed = {**catalog_payload, "revision": 5}
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json=changed, headers={"ETag": '"rev-5"'})
+    count = aioclient_mock.call_count
+    hass.bus.async_fire(EVENT_CATALOG_CHANGED, {"revision": 5})
+    await hass.async_block_till_done()
+    assert aioclient_mock.call_count == count + 2
+    assert entry.runtime_data.coordinator.data.catalog.revision == 5
+    assert hass_storage[f"{DOMAIN}.{entry.entry_id}.catalog"]["data"] == {
+        "etag": '"rev-5"',
+        "catalog": changed,
+    }
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_304_keeps_catalog(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coordinator = entry.runtime_data.coordinator
+    original = coordinator.data.catalog
+    last_sync = coordinator.data.last_sync
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", status=304)
+    next_sync = last_sync + timedelta(seconds=10)
+    with patch(
+        "custom_components.cinema_studio.coordinator.dt_util.utcnow", return_value=next_sync
+    ):
+        await coordinator.async_refresh()
+    assert coordinator.data.catalog is original
+    assert coordinator.data.connected
+    assert coordinator.data.last_sync == next_sync
+    assert aioclient_mock.mock_calls[-1][3]["If-None-Match"] == '"rev-7"'
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_snapshot_304(hass, entry, aioclient_mock, hass_storage, catalog_payload):
+    snapshot(hass_storage, entry, catalog_payload)
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", status=304)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.runtime_data.coordinator.data.catalog.revision == 4
+    assert entry.runtime_data.coordinator.data.connected
+    assert aioclient_mock.mock_calls[-1][3]["If-None-Match"] == '"rev-7"'
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_online_then_offline(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coordinator = entry.runtime_data.coordinator
+    original = coordinator.data
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
+    await coordinator.async_refresh()
+    assert not coordinator.data.connected
+    assert coordinator.data.catalog is original.catalog
+    assert coordinator.data.last_sync == original.last_sync
+    assert coordinator.data.app_version == original.app_version
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_auth_never_uses_snapshot(hass, entry, aioclient_mock, hass_storage, catalog_payload):
+    snapshot(hass_storage, entry, catalog_payload)
+    aioclient_mock.get(f"{BASE}/health", status=401)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    await hass.async_block_till_done()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_coordinator_auth_error(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", status=403)
+    with pytest.raises(ConfigEntryAuthFailed):
+        await entry.runtime_data.coordinator._async_update_data()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_corrupt_snapshot_recovers(
+    hass, entry, aioclient_mock, hass_storage, catalog_payload
+):
+    snapshot(hass_storage, entry, {"revision": "bad"})
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.runtime_data.coordinator.data.connected
+    assert "If-None-Match" not in aioclient_mock.mock_calls[-1][3]
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_options_reload(hass, entry, aioclient_mock, catalog_payload):
+    # Option changes rebuild the runtime and its entity subscriptions.
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    with patch.object(hass.config_entries, "async_reload", return_value=True) as reload:
+        hass.config_entries.async_update_entry(entry, options={"scan_interval": 60})
+        await hass.async_block_till_done()
+        reload.assert_awaited_once_with(entry.entry_id)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_invalid_catalog_preserves_snapshot(
+    hass, entry, aioclient_mock, hass_storage, catalog_payload
+):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coordinator = entry.runtime_data.coordinator
+    original = coordinator.data
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json={"revision": 5}, headers={"ETag": '"rev-5"'})
+    await coordinator.async_refresh()
+    assert not coordinator.data.connected
+    assert coordinator.data.catalog is original.catalog
+    assert coordinator.data.last_sync == original.last_sync
+    assert hass_storage[f"{DOMAIN}.{entry.entry_id}.catalog"]["data"] == {
+        "etag": '"rev-7"',
+        "catalog": catalog_payload,
+    }
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", status=304)
+    await coordinator.async_refresh()
+    assert coordinator.data.connected
+    assert aioclient_mock.mock_calls[-1][3]["If-None-Match"] == '"rev-7"'
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_304_without_catalog_retries(hass, entry, aioclient_mock):
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", status=304)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_corrupt_snapshot_offline_retries(hass, entry, aioclient_mock, hass_storage):
+    snapshot(hass_storage, entry, {"revision": 4})
+    aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_refresh_starts_reauth(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", status=401)
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert any(
+        flow["context"]["source"] == SOURCE_REAUTH and flow["context"]["entry_id"] == entry.entry_id
+        for flow in hass.config_entries.flow.async_progress()
+    )
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_remove_snapshot(hass, entry, aioclient_mock, hass_storage, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    key = f"{DOMAIN}.{entry.entry_id}.catalog"
+    assert key in hass_storage
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert key not in hass_storage
+
+
+async def test_polling_without_entities(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    count = aioclient_mock.call_count
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=46))
+    await hass.async_block_till_done()
+    assert aioclient_mock.call_count == count + 2
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    count = aioclient_mock.call_count
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=100))
+    await hass.async_block_till_done()
+    assert aioclient_mock.call_count == count
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_credential_update_reloads_once(hass, entry, aioclient_mock, catalog_payload, source):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": source, "entry_id": entry.entry_id},
+        data=dict(entry.data) if source == "reauth" else None,
+    )
+    with patch.object(hass.config_entries, "async_reload", return_value=True) as reload:
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**entry.data, "token": "rotated"}
+        )
+        await hass.async_block_till_done()
+        reload.assert_awaited_once_with(entry.entry_id)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_auth_failed_entry_revived_by_discovery(hass, entry, aioclient_mock, catalog_payload):
+    aioclient_mock.get(f"{BASE}/health", status=401)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    await hass.async_block_till_done()
+    aioclient_mock.clear_requests()
+    online(aioclient_mock, catalog_payload)
+    info = HassioServiceInfo(
+        config={**entry.data, "token": "valid", "instance_id": "studio-id"},
+        name="Cinema Studio",
+        slug="cinema_studio",
+        uuid="1234",
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_HASSIO}, data=info
+    )
+    assert result["reason"] == "already_configured"
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.data["token"] == "valid"
+    assert aioclient_mock.mock_calls[0][3]["Authorization"] == "Bearer valid"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_discovery_unchanged_does_not_reload(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    info = HassioServiceInfo(
+        config={**entry.data, "instance_id": "studio-id"},
+        name="Cinema Studio",
+        slug="cinema_studio",
+        uuid="1234",
+    )
+    with patch.object(hass.config_entries, "async_reload", return_value=True) as reload:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_HASSIO}, data=info
+        )
+        await hass.async_block_till_done()
+        assert result["reason"] == "already_configured"
+        reload.assert_not_awaited()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_retry_entry_revived_by_unchanged_discovery(
+    hass, entry, aioclient_mock, catalog_payload
+):
+    aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    aioclient_mock.clear_requests()
+    online(aioclient_mock, catalog_payload)
+    info = HassioServiceInfo(
+        config={**entry.data, "instance_id": "studio-id"},
+        name="Cinema Studio",
+        slug="cinema_studio",
+        uuid="1234",
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_HASSIO}, data=info
+    )
+    assert result["reason"] == "already_configured"
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_install_is_awaited_before_coordinator_data_changes(
+    hass, entry, aioclient_mock, catalog_payload
+):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coordinator = entry.runtime_data.coordinator
+    original = coordinator.data
+    events = []
+    manager = entry.runtime_data.manager
+
+    async def install(catalog, raw, persist):
+        events.append(("install", coordinator.data is original, catalog.revision))
+        await persist(raw)
+        events.append(("persisted", coordinator.data is original))
+
+    manager.async_install_snapshot = install
+    changed = {**catalog_payload, "revision": 5}
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json=changed, headers={"ETag": '"rev-5"'})
+    await coordinator.async_refresh()
+    assert events == [("install", True, 5), ("persisted", True)]
+    assert coordinator.data.catalog.revision == 5
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_install_failure_keeps_previous_data(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coordinator = entry.runtime_data.coordinator
+    original = coordinator.data
+
+    async def fail_install(catalog, raw, persist):
+        raise RuntimeError("manager adoption failed")
+
+    coordinator.manager.async_install_snapshot = fail_install
+    changed = {**catalog_payload, "revision": 5}
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json=changed, headers={"ETag": '"rev-5"'})
+    await coordinator.async_refresh()
+    assert coordinator.data is original
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_invalid_catalog_raises_issue_and_valid_catalog_clears_it(
+    hass, entry, aioclient_mock, catalog_payload
+):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coordinator = entry.runtime_data.coordinator
+    registry = ir.async_get(hass)
+    assert registry.async_get_issue(DOMAIN, "invalid_catalog") is None
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json={"revision": 5}, headers={"ETag": '"rev-5"'})
+    await coordinator.async_refresh()
+    issue = registry.async_get_issue(DOMAIN, "invalid_catalog")
+    assert issue is not None
+    assert issue.translation_key == "invalid_catalog"
+    assert issue.severity is ir.IssueSeverity.WARNING
+    assert not issue.is_fixable
+    assert issue.translation_placeholders is not None
+    assert issue.translation_placeholders["error"]
+    changed = {**catalog_payload, "revision": 6}
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json=changed, headers={"ETag": '"rev-6"'})
+    await coordinator.async_refresh()
+    assert coordinator.data.catalog.revision == 6
+    assert registry.async_get_issue(DOMAIN, "invalid_catalog") is None
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_invalid_catalog_without_snapshot_retries_and_raises_issue(
+    hass, entry, aioclient_mock
+):
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json={"revision": 5}, headers={"ETag": '"rev-5"'})
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "invalid_catalog") is not None
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_offline_selection_reload_preserves_activation(
+    hass, entry, aioclient_mock, hass_storage, catalog_payload
+):
+    """Use real snapshot loading, a failing client, and the HA reload lifecycle."""
+    from unittest.mock import AsyncMock
+
+    from custom_components.cinema_studio.api import StudioConnectionError
+    from custom_components.cinema_studio.catalog import parse_catalog
+    from custom_components.cinema_studio.coordinator import CinemaStudioState
+
+    catalog_payload["collections"][0]["playback_mode"] = "sequential"
+    snapshot(hass_storage, entry, catalog_payload)
+    aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
+    with patch(
+        "custom_components.cinema_studio.api.StudioClient.post_selections",
+        new_callable=AsyncMock,
+        side_effect=StudioConnectionError("offline"),
+    ) as post:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        manager = entry.runtime_data.manager
+        args = {"collection_ref": None, "season_ref": None, "dry_run": False}
+        first = await manager.async_select(**args)
+        assert first["clip_id"] == "clip-a"
+        assert not entry.runtime_data.coordinator.data.connected
+        await hass.async_block_till_done(wait_background_tasks=True)
+        post.assert_awaited()
+        assert manager._selection_queue
+        raw = {
+            **catalog_payload,
+            "revision": 5,
+            "seasons": [
+                *catalog_payload["seasons"],
+                {
+                    **catalog_payload["seasons"][0],
+                    "id": "holiday",
+                    "name": "Holiday",
+                    "start": "01-01",
+                    "end": "12-31",
+                    "priority": 10,
+                },
+            ],
+        }
+        coordinator = entry.runtime_data.coordinator
+        await manager.async_install_snapshot(
+            parse_catalog(raw), {"catalog": raw, "etag": None}, coordinator._snapshot.async_save
+        )
+        coordinator.data = CinemaStudioState(parse_catalog(raw), False, None, None)
+        assert (await manager.async_select(**args))["activation_reset"]
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        reloaded = entry.runtime_data.manager
+        assert reloaded is not manager
+        assert reloaded._activation.last_effective_season == "holiday"
+        assert not (await reloaded.async_select(**args))["activation_reset"]
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert reloaded._selection_queue
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_coordinator_update_reverifies_unchanged_catalog(
+    hass, entry, aioclient_mock, catalog_payload, media_root
+):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    manager = entry.runtime_data.manager
+    path = media_root / catalog_payload["clips"][0]["render"]["relative_path"]
+    path.unlink()
+    await manager.async_reverify()
+    assert not manager._verified["r1"]
+    path.write_bytes(b"12345")
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", status=304)
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert manager._verified["r1"]
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "corrupt", "os"])
+async def test_manager_setup_failure_ha_retries(hass, entry, failure):
+    from custom_components.cinema_studio.fence import FenceCorrupt, FenceTimeout
+
+    error = {"timeout": FenceTimeout(), "corrupt": FenceCorrupt(), "os": OSError()}[failure]
+    with patch("custom_components.cinema_studio.fence.ConsumerFence.write", side_effect=error):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_remove_entry_clears_repairs(hass, entry):
+    from custom_components.cinema_studio import async_remove_entry
+
+    for issue_id in ("consumer_corrupt", "invalid_catalog"):
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=issue_id,
+        )
+    ir.async_create_issue(
+        hass,
+        "other_domain",
+        "consumer_corrupt",
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="consumer_corrupt",
+    )
+    await async_remove_entry(hass, entry)
+    registry = ir.async_get(hass)
+    assert registry.async_get_issue(DOMAIN, "consumer_corrupt") is None
+    assert registry.async_get_issue(DOMAIN, "invalid_catalog") is None
+    assert registry.async_get_issue("other_domain", "consumer_corrupt") is not None
+
+
+async def test_refresh_task_owned_by_entry(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    with patch.object(
+        entry, "async_create_background_task", wraps=entry.async_create_background_task
+    ) as create:
+        await entry.runtime_data.coordinator.async_refresh()
+        assert create.called
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_unload_cancels_selection_flush(hass, entry, aioclient_mock, catalog_payload):
+    import asyncio
+
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def post(events):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    manager = entry.runtime_data.manager
+    with patch.object(entry.runtime_data.client, "post_selections", side_effect=post):
+        await manager.async_select(collection_ref=None, season_ref=None, dry_run=False)
+        await started.wait()
+        assert entry._background_tasks
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        assert cancelled.is_set()
+        assert not entry._background_tasks
+    assert len((await manager._store.async_load())["selection_queue"]) == 1

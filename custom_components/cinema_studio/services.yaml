@@ -1,0 +1,24 @@
+select_next_clip:
+  fields:
+    collection_id:
+      selector:
+        text: {}
+    season:
+      selector:
+        text: {}
+    dry_run:
+      default: false
+      selector:
+        boolean: {}
+reset_history:
+  fields:
+    collection_id:
+      selector:
+        text: {}
+refresh: {}
+import_legacy:
+  fields:
+    history_only:
+      default: false
+      selector:
+        boolean: {}

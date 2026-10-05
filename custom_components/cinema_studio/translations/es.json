@@ -1,0 +1,143 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Conectar con Cinema Studio",
+        "data": {
+          "host": "Servidor",
+          "port": "Puerto",
+          "token": "Token de API"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigurar Cinema Studio",
+        "data": {
+          "host": "Servidor",
+          "port": "Puerto",
+          "token": "Token de API"
+        }
+      },
+      "hassio_confirm": {
+        "title": "Cinema Studio detectado",
+        "description": "¿Conectar con {addon}?"
+      }
+    },
+    "error": {
+      "cannot_connect": "No se pudo conectar",
+      "invalid_auth": "Token de API no válido",
+      "invalid_host": "Introduce un servidor"
+    },
+    "abort": {
+      "single_instance_allowed": "Solo se permite una instancia de Cinema Studio",
+      "already_configured": "Ya está configurado",
+      "invalid_discovery_info": "Información de detección no válida",
+      "invalid_auth": "Token de API no válido",
+      "cannot_connect": "No se pudo verificar Cinema Studio",
+      "reauth_successful": "Credenciales actualizadas",
+      "reconfigure_successful": "Conexión actualizada",
+      "unique_id_mismatch": "Es otra instancia de Cinema Studio"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opciones de Cinema Studio",
+        "data": {
+          "season_entity": "Entidad de temporada",
+          "scan_interval": "Intervalo de actualización",
+          "history_reset_mode": "Modo de reinicio del historial",
+          "history_reset_time": "Hora de reinicio del historial"
+        }
+      }
+    }
+  },
+  "issues": {
+    "invalid_catalog": {
+      "title": "Cinema Studio devolvió un catálogo no válido",
+      "description": "Se rechazó el último catálogo: {error}. El último catálogo válido sigue activo."
+    },
+    "consumer_corrupt": {
+      "title": "Archivo de consumidor inválido",
+      "description": "No se puede leer el archivo de consumidor de forma segura. Restaure un archivo válido antes de reintentar Cinema Studio."
+    }
+  },
+  "exceptions": {
+    "not_ready": {
+      "message": "Cinema Studio no está listo."
+    },
+    "no_playable_clip": {
+      "message": "No hay clips disponibles para reproducir."
+    },
+    "unknown_collection": {
+      "message": "Colección desconocida."
+    },
+    "unknown_season": {
+      "message": "Temporada desconocida."
+    }
+  },
+  "services": {
+    "select_next_clip": {
+      "name": "Seleccionar siguiente clip",
+      "description": "Selecciona un clip de vídeo verificado del catálogo guardado y registra el historial, salvo en una simulación.",
+      "fields": {
+        "collection_id": {
+          "name": "Colección",
+          "description": "ID o nombre de la colección. Déjelo vacío para usar la temporada activa."
+        },
+        "season": {
+          "name": "Temporada",
+          "description": "ID o nombre de temporada solo para esta llamada. Déjelo vacío para resolver la temporada activa automáticamente."
+        },
+        "dry_run": {
+          "name": "Simulación",
+          "description": "Verifica y devuelve un clip sin registrar historial, añadir una reserva ni cambiar la activación de temporada."
+        }
+      }
+    },
+    "reset_history": {
+      "name": "Restablecer historial",
+      "description": "Borra los clips reproducidos de una colección o de todas si no se indica una colección.",
+      "fields": {
+        "collection_id": {
+          "name": "Colección",
+          "description": "ID o nombre de la colección. Déjelo vacío para restablecer todas las colecciones."
+        }
+      }
+    },
+    "refresh": {
+      "name": "Actualizar",
+      "description": "Solicita el catálogo más reciente de Cinema Studio y verifica los archivos de vídeo guardados.",
+      "fields": {}
+    },
+    "import_legacy": {
+      "name": "Importar datos anteriores",
+      "description": "Importa clips e historial de la integración anterior, o únicamente su historial.",
+      "fields": {
+        "history_only": {
+          "name": "Solo historial",
+          "description": "Importa el historial de reproducción sin importar clips de vídeo."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "active_season": {
+        "name": "Temporada activa"
+      },
+      "catalog": {
+        "name": "Catálogo"
+      }
+    },
+    "select": {
+      "season_override": {
+        "name": "Temporada manual"
+      }
+    },
+    "binary_sensor": {
+      "studio_connected": {
+        "name": "Estudio conectado"
+      }
+    }
+  }
+}

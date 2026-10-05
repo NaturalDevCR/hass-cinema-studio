@@ -1,0 +1,143 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Cinema Studio",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "API token"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Cinema Studio",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "API token"
+        }
+      },
+      "hassio_confirm": {
+        "title": "Cinema Studio discovered",
+        "description": "Connect to {addon}?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect",
+      "invalid_auth": "Invalid API token",
+      "invalid_host": "Enter a host"
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Cinema Studio instance is allowed",
+      "already_configured": "Already configured",
+      "invalid_discovery_info": "Invalid discovery information",
+      "invalid_auth": "Invalid API token",
+      "cannot_connect": "Unable to verify Cinema Studio",
+      "reauth_successful": "Credentials updated",
+      "reconfigure_successful": "Connection updated",
+      "unique_id_mismatch": "This is a different Cinema Studio instance"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Cinema Studio options",
+        "data": {
+          "season_entity": "Season entity",
+          "scan_interval": "Scan interval",
+          "history_reset_mode": "History reset mode",
+          "history_reset_time": "History reset time"
+        }
+      }
+    }
+  },
+  "issues": {
+    "invalid_catalog": {
+      "title": "Cinema Studio returned an invalid catalog",
+      "description": "The latest catalog was rejected: {error}. The last valid catalog remains active."
+    },
+    "consumer_corrupt": {
+      "title": "Invalid consumer file",
+      "description": "The consumer file cannot be read safely. Restore a valid consumer file before retrying Cinema Studio."
+    }
+  },
+  "exceptions": {
+    "not_ready": {
+      "message": "Cinema Studio is not ready."
+    },
+    "no_playable_clip": {
+      "message": "No playable clip is available."
+    },
+    "unknown_collection": {
+      "message": "Unknown collection."
+    },
+    "unknown_season": {
+      "message": "Unknown season."
+    }
+  },
+  "services": {
+    "select_next_clip": {
+      "name": "Select next clip",
+      "description": "Select a verified video clip from the cached catalog and record playback history unless this is a dry run.",
+      "fields": {
+        "collection_id": {
+          "name": "Collection",
+          "description": "Collection ID or name. Leave empty to use the active season."
+        },
+        "season": {
+          "name": "Season",
+          "description": "Season ID or name for this call only. Leave empty to resolve the active season automatically."
+        },
+        "dry_run": {
+          "name": "Dry run",
+          "description": "Verify and return a clip without recording history, adding a pin, or changing season activation."
+        }
+      }
+    },
+    "reset_history": {
+      "name": "Reset history",
+      "description": "Clear played clips for one collection, or all collections when no collection is specified.",
+      "fields": {
+        "collection_id": {
+          "name": "Collection",
+          "description": "Collection ID or name. Leave empty to reset all collections."
+        }
+      }
+    },
+    "refresh": {
+      "name": "Refresh",
+      "description": "Request the latest catalog from Cinema Studio and recheck cached render files.",
+      "fields": {}
+    },
+    "import_legacy": {
+      "name": "Import legacy",
+      "description": "Import clips and playback history from the legacy integration, or import only its history.",
+      "fields": {
+        "history_only": {
+          "name": "History only",
+          "description": "Import playback history without importing video clips."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "active_season": {
+        "name": "Active season"
+      },
+      "catalog": {
+        "name": "Catalog"
+      }
+    },
+    "select": {
+      "season_override": {
+        "name": "Season override"
+      }
+    },
+    "binary_sensor": {
+      "studio_connected": {
+        "name": "Studio connected"
+      }
+    }
+  }
+}
