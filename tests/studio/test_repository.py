@@ -1011,5 +1011,6 @@ def test_atomic_legacy_clip_without_output(repo: Repository) -> None:
         needs_source=True,
         render=None,
     )
-    assert clip.render is None and clip.needs_source and clip.status == "processing"
+    assert clip.render is None and clip.needs_source and clip.status == "failed"
+    assert clip.error == "no usable source or output (re-import or upload source)"
     assert repo.catalog_revision() == before + 1

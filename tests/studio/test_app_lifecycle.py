@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -590,3 +591,14 @@ async def test_housekeeping_loop_stops_when_cancelled(paths: Paths, made: list[F
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_housekeeping_discards_legacy_without_uploads(paths: Paths, made: list[FastAPI]):
+    app = build(made, paths, start_background=False)
+    run = paths.work_dir / "import" / "abandoned"
+    run.mkdir(parents=True)
+    # A valid manifest is unnecessary for an abandoned, incomplete staging directory.
+    old = time.time() - 7200
+    os.utime(run, (old, old))
+    await lifecycle._clean_up(app)
+    assert not run.exists()

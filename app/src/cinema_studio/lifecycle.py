@@ -67,7 +67,7 @@ async def supervisor_startup(app: FastAPI) -> None:
 
 
 async def housekeeping(app: FastAPI, interval: float) -> None:
-    """Purge abandoned uploads now, then every ``interval``; retry a failed discovery then."""
+    """Purge abandoned uploads/imports periodically and retry failed discovery."""
     while True:
         await _clean_up(app)
         await asyncio.sleep(interval)
@@ -76,12 +76,17 @@ async def housekeeping(app: FastAPI, interval: float) -> None:
 
 async def _clean_up(app: FastAPI) -> None:
     uploads = getattr(app.state, "uploads", None)
-    if uploads is None:
-        return
-    try:
-        await asyncio.to_thread(uploads.purge_stale)
-    except Exception:
-        _LOGGER.exception("Upload cleanup failed")
+    if uploads is not None:
+        try:
+            await asyncio.to_thread(uploads.purge_stale)
+        except Exception:
+            _LOGGER.exception("Upload cleanup failed")
+    legacy = getattr(app.state, "legacy", None)
+    if legacy is not None:
+        try:
+            await asyncio.to_thread(legacy.discard_stale)
+        except Exception:
+            _LOGGER.exception("Legacy import cleanup failed")
 
 
 async def _resync(app: FastAPI) -> None:

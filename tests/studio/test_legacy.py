@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -17,16 +18,35 @@ from cinema_studio.errors import ConflictError, InvalidError
 from cinema_studio.legacy import LegacyImporter, LegacyManifest
 from cinema_studio.media import file_sha256, legacy_fingerprint
 from cinema_studio.models import CollectionUpdate
+from cinema_studio.probe import probe
+from cinema_studio.timing import Timing
+from cinema_studio.timing_validation import validate_timing
 
 pytestmark = pytest.mark.studio
 NOW = datetime(2026, 10, 5, 12, tzinfo=UTC)
+CLIP_ID = "12345678-1234-4234-8234-123456789abc"
+OTHER_ID = "abcdef12-1234-4234-8234-123456789abc"
+DURATION = 20.0
+# Production: total 154.133, content 150.125, lead 2.0, tail 2.008.
+# At 20 seconds the rounded lead and tail remain distinct (.260 / .261).
+SCALE = DURATION / 154.133
 TIMING = {
-    "content_duration_seconds": 2.0,
-    "lead_in_duration_seconds": 1.0,
-    "tail_out_duration_seconds": 1.0,
-    "content_start_offset_seconds": 1.0,
-    "content_end_offset_seconds": 3.0,
+    "content_duration_seconds": 150.125 * SCALE,
+    "lead_in_duration_seconds": 2.0 * SCALE,
+    "tail_out_duration_seconds": 2.008 * SCALE,
+    "content_start_offset_seconds": 2.0 * SCALE,
+    "content_end_offset_seconds": 152.125 * SCALE,
 }
+EXPECTED_TIMING = validate_timing(
+    Timing(
+        DURATION,
+        TIMING["content_start_offset_seconds"],
+        TIMING["content_end_offset_seconds"],
+        TIMING["lead_in_duration_seconds"],
+        TIMING["tail_out_duration_seconds"],
+        TIMING["content_duration_seconds"],
+    )
+)
 
 
 @pytest.fixture
@@ -40,7 +60,7 @@ def client(paths: Paths) -> Iterator[TestClient]:
 async def manifest(paths: Paths, make_video: Callable[..., Path]) -> LegacyManifest:
     source = paths.media_dir / "cinema-collections/source"
     compiled = paths.media_dir / "cinema-collections/compiled"
-    video = make_video()
+    video = make_video(seconds=DURATION)
     fingerprint = legacy_fingerprint(await file_sha256(video), video.stat().st_size)
     for root in (source, compiled):
         (root / "regular").mkdir(parents=True)
@@ -54,7 +74,7 @@ async def manifest(paths: Paths, make_video: Callable[..., Path]) -> LegacyManif
                     "id": "regular",
                     "name": "Regular",
                     "playback_mode": "custom",
-                    "ordered_clip_ids": ["worker-1"],
+                    "ordered_clip_ids": [CLIP_ID],
                     "processing_profile_id": "worker-profile",
                     "enabled": True,
                 }
@@ -81,13 +101,13 @@ async def manifest(paths: Paths, make_video: Callable[..., Path]) -> LegacyManif
             ],
             "clips": [
                 {
-                    "id": "worker-1",
+                    "id": CLIP_ID,
                     "collection_id": "regular",
                     "state": "ready",
                     "relative_source_path": "regular/movie.mp4",
                     "relative_output_path": "regular/movie.mp4",
                     "output_available": True,
-                    "output_duration_seconds": 4.0,
+                    "output_duration_seconds": DURATION,
                     "updated_at": "2026-10-01T00:00:00Z",
                     "metadata": {
                         **TIMING,
@@ -108,12 +128,12 @@ def importer(client: TestClient, paths: Paths, now: datetime = NOW) -> LegacyImp
 async def test_happy_path(client: TestClient, paths: Paths, manifest: LegacyManifest) -> None:
     legacy = importer(client, paths)
     stage = await legacy.stage(manifest)
-    assert stage.staged == ["worker-1"] and stage.rejected == []
+    assert stage.staged == [CLIP_ID] and stage.rejected == []
     assert (paths.work_dir / "import" / stage.run_id / "stage.json").is_file()
     # A new instance can commit persisted staging.
     report = await importer(client, paths).commit(stage.run_id, manifest.clips)
     repo = client.app.state.repo
-    clip = repo.get_clip("worker-1")
+    clip = repo.get_clip(CLIP_ID)
     assert report.imported == [clip.id]
     assert report.missing_assets == ["missing.mp4"]
     assert repo.get_asset("missing.mp4").status == "missing"
@@ -129,8 +149,17 @@ async def test_happy_path(client: TestClient, paths: Paths, manifest: LegacyMani
         clip.render.content_duration,
         clip.render.lead_in,
         clip.render.tail_out,
-    ) == (4, 1, 3, 2, 1, 1)
-    assert clip.recipe.lead_in == 1 and clip.recipe.tail_out == 1
+    ) == (
+        EXPECTED_TIMING.duration,
+        EXPECTED_TIMING.content_start,
+        EXPECTED_TIMING.content_end,
+        EXPECTED_TIMING.content_duration,
+        EXPECTED_TIMING.lead_in,
+        EXPECTED_TIMING.tail_out,
+    )
+    assert clip.recipe.lead_in == EXPECTED_TIMING.lead_in
+    assert clip.recipe.tail_out == EXPECTED_TIMING.tail_out
+    assert clip.recipe.lead_in != clip.recipe.tail_out
     assert clip.sort_key == "regular/movie.mp4"
     render_path = paths.media_dir / clip.render.relative_path
     worker_out = Path(manifest.roots.compiled) / "regular/movie.mp4"
@@ -184,7 +213,7 @@ async def test_verdicts(
     elif case == "nonfinite":
         clip.metadata["content_duration_seconds"] = float("nan")
     elif case == "duration":
-        clip.output_duration_seconds = 5
+        clip.output_duration_seconds = DURATION + 1
     elif case == "null":
         clip.metadata.update(dict.fromkeys(TIMING))
     else:
@@ -203,7 +232,7 @@ async def test_verdicts(
     elif case == "absent":
         assert imported.render is not None
         assert imported.render.timing_source == "legacy_full_file"
-        assert imported.render.content_start == 0 and imported.render.content_end == 4
+        assert imported.render.content_start == 0 and imported.render.content_end == DURATION
     else:
         assert imported.render is None and imported.status == "processing"
         assert report.queued_for_render == [clip.id]
@@ -232,7 +261,7 @@ async def test_refetch(
     assert client.app.state.repo.list_clips() == []
 
 
-@pytest.mark.parametrize("field", ["relative_source_path", "relative_output_path", "id"])
+@pytest.mark.parametrize("field", ["relative_source_path", "relative_output_path"])
 async def test_unsafe_path(
     client: TestClient, paths: Paths, manifest: LegacyManifest, field: str
 ) -> None:
@@ -275,20 +304,20 @@ async def test_active_and_stale(client: TestClient, paths: Paths, manifest: Lega
 
 
 async def test_order_rerun(client: TestClient, paths: Paths, manifest: LegacyManifest) -> None:
-    other = manifest.clips[0].model_copy(deep=True, update={"id": "worker-2"})
+    other = manifest.clips[0].model_copy(deep=True, update={"id": OTHER_ID})
     manifest.clips.append(other)
-    manifest.collections[0].ordered_clip_ids = [other.id, "worker-1"]
+    manifest.collections[0].ordered_clip_ids = [other.id, CLIP_ID]
     legacy = importer(client, paths)
     stage = await legacy.stage(manifest)
     await legacy.commit(stage.run_id, manifest.clips)
     repo = client.app.state.repo
-    assert repo.get_collection("regular").order == [other.id, "worker-1"]
-    repo.set_collection_order("regular", ["worker-1", other.id])
+    assert repo.get_collection("regular").order == [other.id, CLIP_ID]
+    repo.set_collection_order("regular", [CLIP_ID, other.id])
     repo.update_collection("regular", CollectionUpdate(playback_mode="sequential"))
     stage = await legacy.stage(manifest)
     report = await legacy.commit(stage.run_id, manifest.clips)
     assert [s.reason for s in report.skipped] == ["already_imported", "already_imported"]
-    assert repo.get_collection("regular").order == ["worker-1", other.id]
+    assert repo.get_collection("regular").order == [CLIP_ID, other.id]
     assert repo.get_collection("regular").playback_mode == "sequential"
 
 
@@ -308,8 +337,9 @@ async def test_file_rollback(
         raise InvalidError("DB failure")
 
     monkeypatch.setattr(client.app.state.repo, "import_legacy_clip", fail)
-    with pytest.raises(InvalidError, match="DB failure"):
-        await legacy.commit(stage.run_id, manifest.clips)
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    assert report.skipped[0].reason == "import_error: InvalidError"
+    assert client.app.state.repo.last_legacy_report() == report
     assert list(paths.originals_dir.rglob("*.mp4")) == []
     assert list(paths.renders_dir.rglob("*.mp4")) == []
     assert client.app.state.repo.list_clips() == []
@@ -335,7 +365,7 @@ def test_api_wiring(client: TestClient, manifest: LegacyManifest) -> None:
             "clips": [c.model_dump(mode="json") for c in manifest.clips],
         },
     )
-    assert response.status_code == 200 and response.json()["imported"] == ["worker-1"]
+    assert response.status_code == 200 and response.json()["imported"] == [CLIP_ID]
 
 
 async def test_catalog_assets_and_season_update(
@@ -373,17 +403,19 @@ async def test_sql_failure_unlinks_files_and_retry_succeeds(
             "CREATE TRIGGER fail_import BEFORE INSERT ON renders "
             "BEGIN SELECT RAISE(ABORT, 'test render failure'); END"
         )
-    with pytest.raises(ConflictError, match="test render failure"):
-        await legacy.commit(stage.run_id, manifest.clips)
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    assert report.skipped[0].reason == "import_error: ConflictError"
+    assert client.app.state.repo.last_legacy_report() == report
     assert client.app.state.repo.list_clips() == []
     assert client.app.state.repo.list_renders() == []
     assert list(paths.originals_dir.rglob("*.mp4")) == []
     assert list(paths.renders_dir.rglob("*.mp4")) == []
-    assert (paths.work_dir / "import" / stage.run_id / "out/worker-1.mp4").is_file()
+    assert not (paths.work_dir / "import" / stage.run_id).exists()
     with db.transaction() as conn:
         conn.execute("DROP TRIGGER fail_import")
+    stage = await legacy.stage(manifest)
     report = await legacy.commit(stage.run_id, manifest.clips)
-    assert report.imported == ["worker-1"]
+    assert report.imported == [CLIP_ID]
 
 
 @pytest.mark.parametrize("root", ["source", "compiled"])
@@ -408,23 +440,21 @@ async def test_missing_files(
     stage = await legacy.stage(manifest)
     report = await legacy.commit(stage.run_id, manifest.clips)
     if file == "source":
-        assert report.needs_source == ["worker-1"]
+        assert report.needs_source == [CLIP_ID]
     else:
-        assert report.queued_for_render == ["worker-1"]
+        assert report.queued_for_render == [CLIP_ID]
 
 
 async def test_deleted_clip_and_rejected_report(
     client: TestClient, paths: Paths, manifest: LegacyManifest
 ) -> None:
-    manifest.clips.append(
-        manifest.clips[0].model_copy(update={"id": "deleted", "state": "deleted"})
-    )
+    manifest.clips.append(manifest.clips[0].model_copy(update={"id": OTHER_ID, "state": "deleted"}))
     manifest.clips[0].relative_source_path = "../../outside.mp4"
     legacy = importer(client, paths)
     stage = await legacy.stage(manifest)
     assert stage.staged == [] and len(stage.rejected) == 1
     report = await legacy.commit(stage.run_id, manifest.clips)
-    assert [(s.clip_id, s.reason) for s in report.skipped] == [("worker-1", "unsafe_path")]
+    assert [(s.clip_id, s.reason) for s in report.skipped] == [(CLIP_ID, "unsafe_path")]
     assert client.app.state.repo.list_clips() == []
 
 
@@ -454,5 +484,251 @@ async def test_overflow_timing_is_rejected(
     legacy = importer(client, paths)
     stage = await legacy.stage(manifest)
     report = await legacy.commit(stage.run_id, manifest.clips)
-    assert report.queued_for_render == ["worker-1"]
-    assert client.app.state.repo.get_clip("worker-1").render is None
+    assert report.queued_for_render == [CLIP_ID]
+    assert client.app.state.repo.get_clip(CLIP_ID).render is None
+
+
+@pytest.mark.parametrize("offset,accepted", [(0.2, False), (0.04, True), (0.06, False)])
+async def test_probe_duration_tolerance_without_timing(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, offset: float, accepted: bool
+) -> None:
+    clip = manifest.clips[0]
+    for key in TIMING:
+        del clip.metadata[key]
+    measured = await probe(Path(manifest.roots.compiled) / clip.relative_output_path)
+    clip.output_duration_seconds = measured.duration + offset
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    assert stage.staged == [CLIP_ID]
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    imported = client.app.state.repo.get_clip(CLIP_ID)
+    assert (imported.render is not None) is accepted
+    if accepted:
+        assert stage.rejected == [] and report.queued_for_render == []
+        assert imported.render.timing_source == "legacy_full_file"
+    else:
+        assert stage.rejected[0].reason == "output_invalid"
+        assert report.queued_for_render == [CLIP_ID]
+
+
+@pytest.mark.parametrize(
+    "id", ["worker-1", CLIP_ID.upper(), CLIP_ID.replace("-", ""), "../../escape", "not-a-uuid"]
+)
+async def test_invalid_worker_id(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, id: str
+) -> None:
+    manifest.clips[0].id = id
+    stage = await importer(client, paths).stage(manifest)
+    assert stage.staged == []
+    assert [(r.clip_id, r.reason) for r in stage.rejected] == [(id, "invalid_id")]
+
+
+async def test_missing_collection(
+    client: TestClient, paths: Paths, manifest: LegacyManifest
+) -> None:
+    manifest.clips[0].collection_id = "missing"
+    stage = await importer(client, paths).stage(manifest)
+    assert stage.staged == [] and stage.rejected[0].reason == "collection_missing"
+
+
+async def test_existing_app_profile(
+    client: TestClient, paths: Paths, manifest: LegacyManifest
+) -> None:
+    manifest.profiles = []
+    manifest.collections[0].processing_profile_id = "compatibility-4k-loudness"
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    assert stage.staged == [CLIP_ID] and not stage.rejected
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    assert report.imported == [CLIP_ID]
+
+
+async def test_unknown_profile_is_not_invalid_settings(
+    client: TestClient, paths: Paths, manifest: LegacyManifest
+) -> None:
+    manifest.profiles = []
+    stage = await importer(client, paths).stage(manifest)
+    assert stage.rejected[0].reason == "profile_missing"
+
+
+async def test_young_run_kept(client: TestClient, paths: Paths, manifest: LegacyManifest) -> None:
+    stage = await importer(client, paths).stage(manifest)
+    importer(client, paths, NOW + timedelta(minutes=59)).discard_stale()
+    assert (paths.work_dir / "import" / stage.run_id / "stage.json").is_file()
+
+
+async def test_new_collection_order(
+    client: TestClient, paths: Paths, manifest: LegacyManifest
+) -> None:
+    manifest.collections[0].id = "new-collection"
+    manifest.clips[0].collection_id = "new-collection"
+    other = manifest.clips[0].model_copy(update={"id": OTHER_ID})
+    manifest.clips.append(other)
+    manifest.collections[0].ordered_clip_ids = [OTHER_ID, CLIP_ID]
+    manifest.seasons = []
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    await legacy.commit(stage.run_id, manifest.clips)
+    collection = client.app.state.repo.get_collection("new-collection")
+    assert collection.order == [OTHER_ID, CLIP_ID]
+    assert collection.playback_mode == "custom"
+
+
+@pytest.mark.parametrize("root", ["source", "compiled"])
+async def test_worker_symlink_into_studio(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, root: str
+) -> None:
+    target = Path(getattr(manifest.roots, root)) / "regular/movie.mp4"
+    target.unlink()
+    studio_file = paths.originals_dir / "studio.mp4"
+    studio_file.write_bytes(b"Studio owned")
+    target.symlink_to(studio_file)
+    stage = await importer(client, paths).stage(manifest)
+    assert stage.staged == [] and stage.rejected[0].reason == "unsafe_path"
+
+
+async def test_import_root_stray_file_removed(
+    client: TestClient, paths: Paths, manifest: LegacyManifest
+) -> None:
+    root = paths.work_dir / "import"
+    root.mkdir()
+    stray = root / "stray-file"
+    stray.write_text("ignored")
+    stage = await importer(client, paths).stage(manifest)
+    assert stage.staged == [CLIP_ID]
+    assert not stray.exists()
+
+
+@pytest.mark.parametrize("contents", ["{bad json", "{}", '{"started_at":"invalid"}'])
+async def test_corrupt_stage_discarded(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, contents: str
+) -> None:
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    run = paths.work_dir / "import" / stage.run_id
+    (run / "stage.json").write_text(contents)
+    with pytest.raises(InvalidError, match="corrupt"):
+        await legacy.commit(stage.run_id, manifest.clips)
+    assert not run.exists()
+
+
+async def test_no_source_or_output_failed(
+    client: TestClient, paths: Paths, manifest: LegacyManifest
+) -> None:
+    manifest.clips[0].metadata.update(source_fingerprint="wrong", output_fingerprint="wrong")
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    clip = client.app.state.repo.get_clip(CLIP_ID)
+    assert clip.status == "failed"
+    assert clip.error == "no usable source or output (re-import or upload source)"
+    assert report.needs_source == [CLIP_ID] and report.queued_for_render == []
+
+
+async def test_started_at_captured_before_verification(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    legacy = importer(client, paths)
+    original = legacy._link_verified
+
+    async def slow(*args: object):
+        legacy.now = lambda: NOW + timedelta(minutes=10)
+        return await original(*args)
+
+    monkeypatch.setattr(legacy, "_link_verified", slow)
+    stage = await legacy.stage(manifest)
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    assert report.started_at == "2026-10-05T12:00:00Z"
+
+
+async def test_clip_failure_isolated_and_sanitized(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest.clips.append(manifest.clips[0].model_copy(update={"id": OTHER_ID}))
+    repo = client.app.state.repo
+    original = repo.import_legacy_clip
+
+    def fail_first(**kwargs: object):
+        if kwargs["clip_id"] == CLIP_ID:
+            raise InvalidError(f"private path {paths.data_dir}\nsecret password=private")
+        return original(**kwargs)
+
+    monkeypatch.setattr(repo, "import_legacy_clip", fail_first)
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    assert report.imported == [OTHER_ID]
+    assert [(s.clip_id, s.reason) for s in report.skipped] == [
+        (CLIP_ID, "import_error: InvalidError")
+    ]
+    assert repo.last_legacy_report() == report
+    assert not (paths.work_dir / "import" / stage.run_id).exists()
+    assert not list((paths.originals_dir / CLIP_ID).glob("*.mp4"))
+    assert not list((paths.renders_dir / CLIP_ID).glob("*.mp4"))
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+async def test_enqueue_retry_or_failed_status(
+    client: TestClient,
+    paths: Paths,
+    manifest: LegacyManifest,
+    monkeypatch: pytest.MonkeyPatch,
+    failures: int,
+) -> None:
+    manifest.clips[0].metadata["output_fingerprint"] = "wrong"
+    jobs = client.app.state.jobs
+    original = jobs.enqueue_render
+    calls = 0
+
+    def enqueue(clip_id: str):
+        nonlocal calls
+        calls += 1
+        if calls <= failures:
+            raise RuntimeError("queue unavailable")
+        return original(clip_id)
+
+    monkeypatch.setattr(jobs, "enqueue_render", enqueue)
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    report = await legacy.commit(stage.run_id, manifest.clips)
+    clip = client.app.state.repo.get_clip(CLIP_ID)
+    assert calls == 2
+    assert report.imported == [CLIP_ID]
+    if failures == 1:
+        assert report.queued_for_render == [CLIP_ID] and not report.skipped
+        assert len(jobs.list_jobs()) == 1
+        assert clip.status == "processing"
+    else:
+        assert not report.queued_for_render
+        assert report.skipped[0].reason == "import_error: RuntimeError"
+        assert clip.status == "failed" and clip.error == "render not queued"
+    assert client.app.state.repo.last_legacy_report() == report
+
+
+async def test_corrupt_stage_timestamp_returns_422(
+    client: TestClient, paths: Paths, manifest: LegacyManifest
+) -> None:
+    legacy = importer(client, paths)
+    stage = await legacy.stage(manifest)
+    run = paths.work_dir / "import" / stage.run_id
+    stage_file = run / "stage.json"
+    saved = json.loads(stage_file.read_text())
+    saved["started_at"] = "2026-10-05T12:00:00"  # Missing timezone is corrupt persisted state.
+    stage_file.write_text(json.dumps(saved))
+    client.app.state.legacy.now = lambda: NOW
+    headers = {
+        "Authorization": f"Bearer {client.app.state.tokens.get()}",
+        "X-Cinema-Consumer": "test",
+    }
+    response = client.post(
+        "/api/v1/import/legacy",
+        headers=headers,
+        json={
+            "phase": "commit",
+            "run_id": stage.run_id,
+            "clips": [c.model_dump(mode="json") for c in manifest.clips],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "corrupt import stage"
+    assert not run.exists()

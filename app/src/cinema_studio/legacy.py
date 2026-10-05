@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, field_validator
 
 from .config import Paths
 from .errors import ConflictError, InvalidError, NotFoundError
@@ -50,6 +50,7 @@ _TIMING_KEYS = (
     "content_start_offset_seconds",
     "content_end_offset_seconds",
 )
+_WORKER_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _COMPONENT = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
@@ -151,6 +152,13 @@ class _Stage(BaseModel):
     verdicts: list[_Verdict]
     rejected: list[LegacySkip]
 
+    @field_validator("started_at")
+    @classmethod
+    def _aware_timestamp(cls, value: str) -> str:
+        if datetime.fromisoformat(value).tzinfo is None:
+            raise ValueError("stage timestamp must include a timezone")
+        return value
+
 
 def _iso(now: datetime) -> str:
     return now.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -223,13 +231,17 @@ class LegacyImporter:
         validate_contained_path(self._root, self.paths.media_dir)
         cutoff = self.now().astimezone(UTC) - timedelta(hours=1)
         for run in self._root.iterdir():
-            validate_contained_path(run, self.paths.media_dir)
-            if not run.is_dir():
+            if run.is_symlink() or not run.is_dir():
+                run.unlink()
                 continue
+            validate_contained_path(run, self.paths.media_dir)
             try:
                 stage = _Stage.model_validate_json((run / "stage.json").read_text())
                 started = datetime.fromisoformat(stage.started_at)
-            except (OSError, ValueError):
+            except ValueError as exc:
+                shutil.rmtree(run)
+                raise InvalidError("corrupt import stage") from exc
+            except OSError:
                 started = datetime.fromtimestamp(run.stat().st_mtime, UTC)
             if started < cutoff:
                 shutil.rmtree(run)
@@ -257,11 +269,12 @@ class LegacyImporter:
     async def stage(self, manifest: LegacyManifest) -> LegacyStageResponse:
         if self._lock.locked():
             raise ConflictError("Another legacy import is active")
+        started_at = self.now()
         self.discard_stale()
         async with self._lock:
             if self._root.exists() and any(self._root.iterdir()):
                 raise ConflictError("Another legacy import is active")
-            local = self.now().astimezone()
+            local = started_at.astimezone()
             if (
                 manifest.worker.queue_depth
                 or manifest.worker.active_job_ids
@@ -269,11 +282,13 @@ class LegacyImporter:
             ):
                 raise InvalidError("The Worker must be idle and outside its maintenance window")
             source_root, output_root = self._roots(manifest)
-            valid_profiles: set[str] = set()
+            valid_profiles = {profile.id for profile in self.repo.list_processing_profiles()}
+            invalid_profiles: set[str] = set()
             for profile in manifest.profiles:
                 try:
                     validate_settings(profile.settings)
                 except ValueError:
+                    invalid_profiles.add(profile.id)
                     continue
                 valid_profiles.add(profile.id)
             profile_for = {c.id: c.processing_profile_id for c in manifest.collections}
@@ -290,12 +305,20 @@ class LegacyImporter:
                     if clip.id in seen:
                         raise InvalidError("Duplicate Worker clip id")
                     seen.add(clip.id)
-                    if profile_for.get(clip.collection_id) not in valid_profiles:
-                        rejected.append(LegacySkip(clip_id=clip.id, reason="profile_invalid"))
+                    reason = None
+                    profile_id = profile_for.get(clip.collection_id)
+                    if not _WORKER_ID.fullmatch(clip.id):
+                        reason = "invalid_id"
+                    elif profile_id is None:
+                        reason = "collection_missing"
+                    elif profile_id in invalid_profiles:
+                        reason = "profile_invalid"
+                    elif profile_id not in valid_profiles:
+                        reason = "profile_missing"
+                    if reason is not None:
+                        rejected.append(LegacySkip(clip_id=clip.id, reason=reason))
                         continue
                     try:
-                        if not _COMPONENT.fullmatch(clip.id):
-                            raise InvalidError("unsafe_path")
                         source = _safe_file(
                             source_root, clip.relative_source_path, self.paths.root.resolve()
                         )
@@ -364,7 +387,7 @@ class LegacyImporter:
                             rejected.append(LegacySkip(clip_id=clip.id, reason="output_invalid"))
                     verdicts.append(verdict)
                 record = _Stage(
-                    started_at=_iso(self.now()),
+                    started_at=_iso(started_at),
                     manifest=manifest,
                     verdicts=verdicts,
                     rejected=rejected,
@@ -397,6 +420,9 @@ class LegacyImporter:
                 stage = _Stage.model_validate_json((run / "stage.json").read_text())
             except FileNotFoundError as exc:
                 raise NotFoundError("Import run not found") from exc
+            except (ValueError, OSError) as exc:
+                shutil.rmtree(run)
+                raise InvalidError("corrupt import stage") from exc
             report = LegacyReport(
                 run_id=run_id,
                 started_at=stage.started_at,
@@ -410,53 +436,64 @@ class LegacyImporter:
             )
             staged_ids = {v.clip_id for v in stage.verdicts}
             report.skipped.extend(r for r in stage.rejected if r.clip_id not in staged_ids)
-            await self._import_catalog(stage.manifest, report)
-            refetched = {clip.id: clip for clip in clips}
-            originals = {clip.id: clip for clip in stage.manifest.clips}
-            for verdict in stage.verdicts:
-                clip = originals[verdict.clip_id]
-                fresh = refetched.get(clip.id)
-                reason = None
-                if fresh is None:
-                    reason = "missing_from_refetch"
-                elif fresh.updated_at != clip.updated_at or any(
-                    fresh.metadata.get(k) != clip.metadata.get(k)
-                    for k in ("source_fingerprint", "output_fingerprint")
-                ):
-                    reason = "changed_during_import"
-                else:
+            try:
+                await self._import_catalog(stage.manifest, report)
+                refetched = {clip.id: clip for clip in clips}
+                originals = {clip.id: clip for clip in stage.manifest.clips}
+                for verdict in stage.verdicts:
                     try:
-                        self.repo.get_clip(clip.id)
+                        clip = originals[verdict.clip_id]
+                        fresh = refetched.get(clip.id)
+                        reason = None
+                        if fresh is None:
+                            reason = "missing_from_refetch"
+                        elif fresh.updated_at != clip.updated_at or any(
+                            fresh.metadata.get(k) != clip.metadata.get(k)
+                            for k in ("source_fingerprint", "output_fingerprint")
+                        ):
+                            reason = "changed_during_import"
+                        else:
+                            try:
+                                self.repo.get_clip(clip.id)
+                            except NotFoundError:
+                                pass
+                            else:
+                                reason = "already_imported"
+                        if reason is not None:
+                            report.skipped.append(LegacySkip(clip_id=clip.id, reason=reason))
+                            continue
+                        await self._import_clip(run, clip, verdict, report)
+                    except Exception as exc:
+                        # Expose only the class: tool errors may contain private paths or secrets.
+                        report.skipped.append(
+                            LegacySkip(
+                                clip_id=verdict.clip_id,
+                                reason=f"import_error: {type(exc).__name__}",
+                            )
+                        )
+                for collection in stage.manifest.collections:
+                    try:
+                        edited = self.repo.collection_user_edited(collection.id)
                     except NotFoundError:
-                        pass
-                    else:
-                        reason = "already_imported"
-                if reason is not None:
-                    report.skipped.append(LegacySkip(clip_id=clip.id, reason=reason))
-                    continue
-                await self._import_clip(run, clip, verdict, report)
-            for collection in stage.manifest.collections:
-                try:
-                    edited = self.repo.collection_user_edited(collection.id)
-                except NotFoundError:
-                    continue  # Invalid profiles cannot create collections.
-                if not edited and self._profile_exists(collection.processing_profile_id):
-                    self.repo.update_collection(
-                        collection.id,
-                        CollectionUpdate(
-                            playback_mode=collection.playback_mode,
-                            processing_profile_id=collection.processing_profile_id,
-                            enabled=collection.enabled,
-                        ),
-                        user_edit=False,
-                    )
-                    self.repo.set_collection_order(
-                        collection.id, collection.ordered_clip_ids, user_edit=False
-                    )
-            report.finished_at = _iso(self.now())
-            report.catalog_revision = self.repo.catalog_revision()
-            self.repo.save_legacy_report(report)
-            shutil.rmtree(run)
+                        continue  # Invalid profiles cannot create collections.
+                    if not edited and self._profile_exists(collection.processing_profile_id):
+                        self.repo.update_collection(
+                            collection.id,
+                            CollectionUpdate(
+                                playback_mode=collection.playback_mode,
+                                processing_profile_id=collection.processing_profile_id,
+                                enabled=collection.enabled,
+                            ),
+                            user_edit=False,
+                        )
+                        self.repo.set_collection_order(
+                            collection.id, collection.ordered_clip_ids, user_edit=False
+                        )
+            finally:
+                report.finished_at = _iso(self.now())
+                report.catalog_revision = self.repo.catalog_revision()
+                self.repo.save_legacy_report(report)
+                shutil.rmtree(run)
             return report
 
     def _profile_exists(self, profile_id: str) -> bool:
@@ -611,5 +648,12 @@ class LegacyImporter:
         if verdict.original is None:
             report.needs_source.append(clip.id)
         elif render is None:
-            self.jobs.enqueue_render(clip.id)
+            try:
+                self.jobs.enqueue_render(clip.id)
+            except Exception:
+                try:
+                    self.jobs.enqueue_render(clip.id)
+                except Exception:
+                    self.repo.set_status(clip.id, "failed", "render not queued")
+                    raise
             report.queued_for_render.append(clip.id)

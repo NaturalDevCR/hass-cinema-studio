@@ -855,27 +855,18 @@ class Repository:
         now = utcnow_iso()
         with self._write() as tx:
             conn = tx.conn
-            if conn.execute("SELECT 1 FROM clips WHERE id = ?", (new_id,)).fetchone():
-                raise ConflictError(f"Clip '{new_id}' already exists.")
-            _check_collection(conn, collection_id)
-            _check_normalization_profile(conn, recipe.profile_id)
-            conn.execute(
-                "INSERT INTO clips (id, collection_id, title, source_name, original, recipe,"
-                " status, needs_source, sort_key, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    new_id,
-                    collection_id,
-                    clean_title,
-                    source_name,
-                    original.model_dump_json() if original else None,
-                    recipe.model_dump_json(),
-                    status,
-                    int(needs_source),
-                    sort_key,
-                    now,
-                    now,
-                ),
+            _insert_clip(
+                conn,
+                clip_id=new_id,
+                collection_id=collection_id,
+                title=clean_title,
+                source_name=source_name,
+                original=original,
+                recipe=recipe,
+                status=status,
+                needs_source=needs_source,
+                sort_key=sort_key,
+                now=now,
             )
             return _get_clip(conn, new_id)
 
@@ -927,28 +918,23 @@ class Repository:
             )
         with self._write() as tx:
             conn = tx.conn
-            if conn.execute("SELECT 1 FROM clips WHERE id = ?", (clip_id,)).fetchone():
-                raise ConflictError(f"Clip '{clip_id}' already exists.")
-            _check_collection(conn, collection_id)
-            _check_normalization_profile(conn, recipe.profile_id)
-            conn.execute(
-                "INSERT INTO clips (id, collection_id, title, source_name, original, recipe,"
-                " status, needs_source, sort_key, created_at, updated_at, published_render_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    clip_id,
-                    collection_id,
-                    clean_title,
-                    source_name,
-                    original.model_dump_json() if original else None,
-                    recipe.model_dump_json(),
-                    "ready" if render is not None else "processing",
-                    int(needs_source),
-                    sort_key,
-                    now,
-                    now,
-                    render.id if render is not None else None,
-                ),
+            unusable = original is None and render is None
+            _insert_clip(
+                conn,
+                clip_id=clip_id,
+                collection_id=collection_id,
+                title=clean_title,
+                source_name=source_name,
+                original=original,
+                recipe=recipe,
+                status="failed" if unusable else "ready" if render is not None else "processing",
+                error="no usable source or output (re-import or upload source)"
+                if unusable
+                else None,
+                needs_source=needs_source,
+                sort_key=sort_key,
+                now=now,
+                published_render_id=render.id if render is not None else None,
             )
             if render is not None:
                 try:
@@ -1356,6 +1342,49 @@ def _next_render_n(conn: sqlite3.Connection, clip_id: str) -> int:
         "SELECT COALESCE(MAX(n), 0) + 1 FROM renders WHERE clip_id = ?", (clip_id,)
     ).fetchone()[0]
     return value
+
+
+def _insert_clip(
+    conn: sqlite3.Connection,
+    *,
+    clip_id: str,
+    collection_id: str,
+    title: str,
+    source_name: str,
+    original: OriginalInfo | None,
+    recipe: Recipe,
+    status: ClipStatus,
+    needs_source: bool,
+    sort_key: str,
+    now: str,
+    error: str | None = None,
+    published_render_id: str | None = None,
+) -> None:
+    """Shared clip insert; the caller owns the transaction and revision policy."""
+    if conn.execute("SELECT 1 FROM clips WHERE id = ?", (clip_id,)).fetchone():
+        raise ConflictError(f"Clip '{clip_id}' already exists.")
+    _check_collection(conn, collection_id)
+    _check_normalization_profile(conn, recipe.profile_id)
+    conn.execute(
+        "INSERT INTO clips (id, collection_id, title, source_name, original, recipe,"
+        " status, needs_source, sort_key, created_at, updated_at, error, published_render_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            clip_id,
+            collection_id,
+            title,
+            source_name,
+            original.model_dump_json() if original else None,
+            recipe.model_dump_json(),
+            status,
+            int(needs_source),
+            sort_key,
+            now,
+            now,
+            error,
+            published_render_id,
+        ),
+    )
 
 
 def _insert_render(conn: sqlite3.Connection, record: RenderRecord) -> None:
