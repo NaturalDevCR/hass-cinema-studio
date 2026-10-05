@@ -1,0 +1,16 @@
+{
+  "services": {
+    "select_next_clip": {
+      "service": "mdi:movie-open"
+    },
+    "reset_history": {
+      "service": "mdi:history"
+    },
+    "refresh": {
+      "service": "mdi:refresh"
+    },
+    "import_legacy": {
+      "service": "mdi:import"
+    }
+  }
+}

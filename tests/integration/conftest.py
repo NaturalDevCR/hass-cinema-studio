@@ -64,3 +64,26 @@ def catalog_payload() -> dict:
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
     """Make custom_components/ discoverable."""
+
+
+@pytest.fixture(autouse=True)
+def media_root(hass, tmp_path, catalog_payload):
+    """Isolate all integration media writes and seed the published render."""
+    hass.config.media_dirs = {"local": str(tmp_path / "media")}
+    path = tmp_path / "media" / catalog_payload["clips"][0]["render"]["relative_path"]
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"12345")
+    return tmp_path / "media"
+
+
+@pytest.fixture
+def make_render_file(media_root):
+    """Create a render at the shared catalog filename convention."""
+
+    def create(clip_id, render_id, n, size):
+        path = media_root / "cinema-studio/renders" / clip_id / f"{clip_id}-r{n}-{render_id}.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"0" * size)
+        return path
+
+    return create

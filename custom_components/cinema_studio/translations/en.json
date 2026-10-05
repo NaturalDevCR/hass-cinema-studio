@@ -55,6 +55,64 @@
     "invalid_catalog": {
       "title": "Cinema Studio returned an invalid catalog",
       "description": "The latest catalog was rejected: {error}. The last valid catalog remains active."
+    },
+    "consumer_corrupt": {
+      "title": "Invalid consumer file",
+      "description": "The consumer file cannot be read safely. Restore a valid consumer file before retrying Cinema Studio."
+    }
+  },
+  "exceptions": {
+    "not_ready": {
+      "message": "Cinema Studio is not ready."
+    },
+    "no_playable_clip": {
+      "message": "No playable clip is available."
+    },
+    "unknown_collection": {
+      "message": "Unknown collection."
+    },
+    "unknown_season": {
+      "message": "Unknown season."
+    }
+  },
+  "services": {
+    "select_next_clip": {
+      "name": "Select next clip",
+      "description": "Select next clip",
+      "fields": {
+        "collection_id": {
+          "name": "Collection"
+        },
+        "season": {
+          "name": "Season"
+        },
+        "dry_run": {
+          "name": "Dry run"
+        }
+      }
+    },
+    "reset_history": {
+      "name": "Reset history",
+      "description": "Reset history",
+      "fields": {
+        "collection_id": {
+          "name": "Collection"
+        }
+      }
+    },
+    "refresh": {
+      "name": "Refresh",
+      "description": "Refresh",
+      "fields": {}
+    },
+    "import_legacy": {
+      "name": "Import legacy",
+      "description": "Import legacy",
+      "fields": {
+        "history_only": {
+          "name": "History only"
+        }
+      }
     }
   }
 }

@@ -55,6 +55,64 @@
     "invalid_catalog": {
       "title": "Cinema Studio devolvió un catálogo no válido",
       "description": "Se rechazó el último catálogo: {error}. El último catálogo válido sigue activo."
+    },
+    "consumer_corrupt": {
+      "title": "Archivo de consumidor inválido",
+      "description": "No se puede leer el archivo de consumidor de forma segura. Restaure un archivo válido antes de reintentar Cinema Studio."
+    }
+  },
+  "exceptions": {
+    "not_ready": {
+      "message": "Cinema Studio no está listo."
+    },
+    "no_playable_clip": {
+      "message": "No hay clips disponibles para reproducir."
+    },
+    "unknown_collection": {
+      "message": "Colección desconocida."
+    },
+    "unknown_season": {
+      "message": "Temporada desconocida."
+    }
+  },
+  "services": {
+    "select_next_clip": {
+      "name": "Seleccionar siguiente clip",
+      "description": "Seleccionar siguiente clip",
+      "fields": {
+        "collection_id": {
+          "name": "Colección"
+        },
+        "season": {
+          "name": "Temporada"
+        },
+        "dry_run": {
+          "name": "Simulación"
+        }
+      }
+    },
+    "reset_history": {
+      "name": "Restablecer historial",
+      "description": "Restablecer historial",
+      "fields": {
+        "collection_id": {
+          "name": "Colección"
+        }
+      }
+    },
+    "refresh": {
+      "name": "Actualizar",
+      "description": "Actualizar",
+      "fields": {}
+    },
+    "import_legacy": {
+      "name": "Importar datos anteriores",
+      "description": "Importar datos anteriores",
+      "fields": {
+        "history_only": {
+          "name": "Solo historial"
+        }
+      }
     }
   }
 }

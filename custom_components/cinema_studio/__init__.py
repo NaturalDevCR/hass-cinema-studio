@@ -50,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CinemaStudioConfigEntry)
     snapshot = Store[dict[str, Any]](hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.catalog")
     coordinator = CinemaStudioCoordinator(hass, entry, client, snapshot)
     had_snapshot = await coordinator.async_load_snapshot()
-    manager = CinemaStudioManager()
+    manager = CinemaStudioManager(hass, entry, coordinator)
     coordinator.manager = manager
     await manager.async_setup()
     await coordinator.async_refresh()
@@ -59,7 +59,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: CinemaStudioConfigEntry)
     if not coordinator.last_update_success and not had_snapshot:
         raise ConfigEntryNotReady("Studio is offline and no catalog snapshot is available")
     entry.runtime_data = CinemaStudioRuntime(client, coordinator, manager)
-    entry.async_on_unload(coordinator.async_add_listener(lambda: None))
+
+    def updated() -> None:
+        hass.async_create_task(manager.async_flush_selections())
+
+    entry.async_on_unload(coordinator.async_add_listener(updated))
 
     async def async_catalog_changed(event: Event) -> None:
         await coordinator.async_request_refresh()
@@ -85,5 +89,5 @@ async def async_remove_entry(hass: HomeAssistant, entry: CinemaStudioConfigEntry
         hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.catalog"
     ).async_remove()
     await Store[dict[str, Any]](
-        hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.history"
+        hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.state"
     ).async_remove()
