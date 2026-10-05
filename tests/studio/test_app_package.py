@@ -31,9 +31,8 @@ def test_dockerfile_uses_local_context_and_pinned_runtime() -> None:
     assert "ui/package-lock.json" in dockerfile
     assert "COPY ui/" in dockerfile
     assert "image:" not in (APP / "config.yaml").read_text()
-    if (APP / "ui").exists():
-        assert (APP / "ui/package.json").is_file()
-        assert (APP / "ui/package-lock.json").is_file()
+    assert (APP / "ui/package.json").is_file()
+    assert (APP / "ui/package-lock.json").is_file()
 
 
 def test_dockerfile_copy_sources_exist() -> None:
@@ -42,8 +41,6 @@ def test_dockerfile_copy_sources_exist() -> None:
         if not parts or parts[0] != "COPY" or "--from" in line:
             continue
         for source in parts[1:-1]:
-            if source.startswith("ui/") or source == "ui/":
-                continue  # built by the Vue track; asserted separately when present
             assert (APP / source).exists(), source
 
 

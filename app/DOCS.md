@@ -6,7 +6,7 @@ Cinema Studio is a Home Assistant panel for importing, editing, rendering and or
 
 1. Open **Cinema Studio** from the Home Assistant sidebar.
 2. Create collections and seasons that match how you organize your clips.
-3. Upload video files, or import them from the folders available in the App's import screen.
+3. Upload video files on the Upload screen. To bring in clips from Cinema Collections, see the import section below.
 4. Set the trim points and processing profile for each clip, then render it.
 5. Install the **Cinema Studio** integration through HACS. It discovers this App automatically and loads its catalog.
 
@@ -16,7 +16,7 @@ If you already use the Cinema Collections integration, run its import once from 
 
 ## Connecting the integration
 
-Discovery normally configures the integration without any input. If it does not, add the **Cinema Studio** integration manually. Use the App hostname shown in **System → Connection** in the App (also listed on the App's page in Home Assistant) as the host, port `8099`, and copy the token from **System → Connection** in the App.
+Discovery normally configures the integration without any input. If it does not, add the **Cinema Studio** integration manually. Take the App hostname from the App's page in the Home Assistant Supervisor, use port `8099`, and copy the token from **System → Connection** in the App.
 
 ## Storage and garbage collection
 
@@ -41,9 +41,9 @@ Home Assistant App backups include the Cinema Studio database, thumbnails and to
 ## Troubleshooting
 
 - If the panel does not load, check the App log and confirm the App is running.
-- If the integration cannot connect, confirm it uses the App hostname shown in **System → Connection**, port `8099`, and the current token.
+- If the integration cannot connect, confirm it uses the App hostname shown on the App's Supervisor page, port `8099`, and the current token.
 - If a clip does not play, confirm it has a finished render and that `/media` is available to Home Assistant.
-- If an import is missing, check that its source folder is available to the App and that the video format is supported.
+- If an upload or import is missing, check the Jobs tray for an error and that the video format is supported.
 
 ## Español
 
