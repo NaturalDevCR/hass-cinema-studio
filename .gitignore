@@ -10,3 +10,4 @@ app/src/cinema_studio/static/
 coverage/
 .claude/
 .superpowers/
+.worktrees/
