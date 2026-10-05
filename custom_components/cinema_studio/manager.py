@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
@@ -93,6 +93,7 @@ class CinemaStudioManager:
         self._ready = False
         self._reverify_fence_failed = False
         self._listeners_registered = False
+        self._listeners: list[Callable[[], None]] = []
         self.override_season: str | None = None
         self.legacy = LegacyImport(hass, self, client)
 
@@ -265,6 +266,7 @@ class CinemaStudioManager:
                 _LOGGER.warning(
                     "Final snapshot fence failed; retaining safe superset", exc_info=True
                 )
+        self._notify_listeners()
 
     def _resolve(self, season_ref: str | None) -> tuple[str, str]:
         entity_id = self.entry.options.get(CONF_SEASON_ENTITY)
@@ -311,6 +313,12 @@ class CinemaStudioManager:
         return reset is not None
 
     async def async_evaluate_activation(self) -> None:
+        try:
+            await self._evaluate_activation()
+        finally:
+            self._notify_listeners()
+
+    async def _evaluate_activation(self) -> None:
         async with self._lock:
             if not self.ready:
                 return
@@ -445,6 +453,7 @@ class CinemaStudioManager:
                             self._selection_queue = previous_queue
                             raise
                         self._last[collection.id] = dict(response)
+                        self._notify_listeners()
                         self.entry.async_create_background_task(
                             self.hass,
                             self.async_flush_selections(),
@@ -492,6 +501,75 @@ class CinemaStudioManager:
         response = self._last.get(collection_id)
         return dict(response) if response else None
 
+    @callback
+    def async_add_listener(self, update: Callable[[], None]) -> Callable[[], None]:
+        """Register an in-memory state listener and return its remover."""
+        self._listeners.append(update)
+
+        @callback
+        def remove() -> None:
+            self._listeners.remove(update)
+
+        return remove
+
+    @callback
+    def _notify_listeners(self) -> None:
+        for update in tuple(self._listeners):
+            try:
+                update()
+            except Exception:
+                _LOGGER.exception("Error notifying Cinema Studio listener")
+
+    def active_season(self) -> tuple[str, str]:
+        """Return the effective season and its source, without action overrides."""
+        return self._resolve(None)
+
+    @property
+    def last_effective_season(self) -> str | None:
+        return self._activation.last_effective_season
+
+    def playable_count(self, collection_id: str) -> int:
+        """Count verified, enabled clips that selection could currently pick."""
+        return len(self._candidates(self._catalog.find_collection(collection_id)))
+
+    def clip_counts(self) -> dict[str, int]:
+        clips = self._catalog.clips
+        verified = [self._verified.get(clip.render.id, False) for clip in clips]
+        return {
+            "clips": len(clips),
+            "playable": sum(
+                1 for clip, ok in zip(clips, verified, strict=True) if clip.enabled and ok
+            ),
+            "unverified": verified.count(False),
+            "invalid": len(self._catalog.invalid_clip_ids),
+        }
+
+    def active_pins(self) -> dict[str, datetime]:
+        """Pins that have not yet expired, by render id."""
+        now = self._now()
+        return {key: expiry for key, expiry in self._pins.items() if expiry > now}
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Compact runtime summary containing no titles, paths or credentials."""
+        counts = self.clip_counts()
+        return {
+            "ready": self._ready,
+            "verification": {
+                "verified": counts["clips"] - counts["unverified"],
+                "unverified": counts["unverified"],
+            },
+            "pins": [
+                {"render_id": key, "expires_at": _iso(expiry)}
+                for key, expiry in sorted(self.active_pins().items())
+            ],
+            "activation": asdict(self._activation),
+            "history": {
+                key: len(value["played_clip_ids"])
+                for key, value in self._history.to_dict()["collections"].items()
+            },
+            "selection_queue": len(self._selection_queue),
+        }
+
     def _cap_queue(self) -> bool:
         excess = len(self._selection_queue) - 2000
         if excess <= 0:
@@ -520,6 +598,7 @@ class CinemaStudioManager:
             self._ready = True
             self._reverify_fence_failed = False
             ir.async_delete_issue(self.hass, DOMAIN, "consumer_corrupt")
+        self._notify_listeners()
 
     async def async_flush_selections(self) -> None:
         async with self._flush_lock:

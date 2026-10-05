@@ -119,5 +119,25 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "active_season": {
+        "name": "Temporada activa"
+      },
+      "catalog": {
+        "name": "Catálogo"
+      }
+    },
+    "select": {
+      "season_override": {
+        "name": "Temporada manual"
+      }
+    },
+    "binary_sensor": {
+      "studio_connected": {
+        "name": "Estudio conectado"
+      }
+    }
   }
 }

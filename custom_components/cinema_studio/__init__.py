@@ -21,7 +21,7 @@ from .coordinator import CinemaStudioCoordinator
 from .manager import CinemaStudioManager
 from .services import async_register_services
 
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SELECT, Platform.BINARY_SENSOR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
 
 

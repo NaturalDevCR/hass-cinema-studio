@@ -1,5 +1,14 @@
 import pytest
 
+from tests.integration.studio_support import (
+    JULY,
+    build_payload,
+    mock_studio,
+    new_entry,
+    setup,
+    write_renders,
+)
+
 
 @pytest.fixture
 def catalog_payload() -> dict:
@@ -87,3 +96,25 @@ def make_render_file(media_root):
         return path
 
     return create
+
+
+@pytest.fixture
+def payload(catalog_payload):
+    """A richer catalog: two collections, two seasons, one unverified and one invalid clip."""
+    return build_payload(catalog_payload)
+
+
+@pytest.fixture
+def july(freezer):
+    """Pin the clock to July so season tests do not depend on the real calendar."""
+    freezer.move_to(JULY)
+    return freezer
+
+
+@pytest.fixture
+async def loaded_entry(hass, july, aioclient_mock, payload, media_root):
+    write_renders(media_root, payload)
+    entry = new_entry(hass)
+    mock_studio(aioclient_mock, payload)
+    await setup(hass, entry)
+    return entry
