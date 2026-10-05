@@ -4,8 +4,10 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
+from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_REAUTH, ConfigEntryState
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
@@ -297,9 +299,6 @@ async def test_credential_update_reloads_once(hass, entry, aioclient_mock, catal
 
 
 async def test_auth_failed_entry_revived_by_discovery(hass, entry, aioclient_mock, catalog_payload):
-    from homeassistant.config_entries import SOURCE_HASSIO
-    from homeassistant.helpers.service_info.hassio import HassioServiceInfo
-
     aioclient_mock.get(f"{BASE}/health", status=401)
     assert not await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is ConfigEntryState.SETUP_ERROR
@@ -324,9 +323,6 @@ async def test_auth_failed_entry_revived_by_discovery(hass, entry, aioclient_moc
 
 
 async def test_discovery_unchanged_does_not_reload(hass, entry, aioclient_mock, catalog_payload):
-    from homeassistant.config_entries import SOURCE_HASSIO
-    from homeassistant.helpers.service_info.hassio import HassioServiceInfo
-
     online(aioclient_mock, catalog_payload)
     assert await hass.config_entries.async_setup(entry.entry_id)
     info = HassioServiceInfo(
@@ -348,9 +344,6 @@ async def test_discovery_unchanged_does_not_reload(hass, entry, aioclient_mock, 
 async def test_retry_entry_revived_by_unchanged_discovery(
     hass, entry, aioclient_mock, catalog_payload
 ):
-    from homeassistant.config_entries import SOURCE_HASSIO
-    from homeassistant.helpers.service_info.hassio import HassioServiceInfo
-
     aioclient_mock.get(f"{BASE}/health", exc=TimeoutError())
     assert not await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is ConfigEntryState.SETUP_RETRY
@@ -413,4 +406,44 @@ async def test_install_failure_keeps_previous_data(hass, entry, aioclient_mock, 
     aioclient_mock.get(f"{BASE}/catalog", json=changed, headers={"ETag": '"rev-5"'})
     await coordinator.async_refresh()
     assert coordinator.data is original
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_invalid_catalog_raises_issue_and_valid_catalog_clears_it(
+    hass, entry, aioclient_mock, catalog_payload
+):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coordinator = entry.runtime_data.coordinator
+    registry = ir.async_get(hass)
+    assert registry.async_get_issue(DOMAIN, "invalid_catalog") is None
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json={"revision": 5}, headers={"ETag": '"rev-5"'})
+    await coordinator.async_refresh()
+    issue = registry.async_get_issue(DOMAIN, "invalid_catalog")
+    assert issue is not None
+    assert issue.translation_key == "invalid_catalog"
+    assert issue.severity is ir.IssueSeverity.WARNING
+    assert not issue.is_fixable
+    assert issue.translation_placeholders is not None
+    assert issue.translation_placeholders["error"]
+    changed = {**catalog_payload, "revision": 6}
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json=changed, headers={"ETag": '"rev-6"'})
+    await coordinator.async_refresh()
+    assert coordinator.data.catalog.revision == 6
+    assert registry.async_get_issue(DOMAIN, "invalid_catalog") is None
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_invalid_catalog_without_snapshot_retries_and_raises_issue(
+    hass, entry, aioclient_mock
+):
+    aioclient_mock.get(f"{BASE}/health", json=HEALTH)
+    aioclient_mock.get(f"{BASE}/catalog", json={"revision": 5}, headers={"ETag": '"rev-5"'})
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "invalid_catalog") is not None
     assert await hass.config_entries.async_unload(entry.entry_id)

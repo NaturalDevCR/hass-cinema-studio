@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from homeassistant import config_entries
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -192,6 +192,35 @@ async def test_options_defaults_and_optional_season(hass):
         "history_reset_mode": "on_exhaustion",
         "history_reset_time": "00:00:00",
     }
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"scan_interval": 9},
+        {"scan_interval": 3601},
+        {"history_reset_mode": "weekly"},
+    ],
+)
+async def test_options_reject_invalid_values(hass, invalid):
+    entry = MockConfigEntry(domain=DOMAIN, data=DATA, unique_id="studio-id")
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(result["flow_id"], invalid)
+    assert dict(entry.options) == {}
+
+
+@pytest.mark.parametrize("interval", [10, 3600])
+async def test_options_accept_interval_bounds(hass, interval):
+    entry = MockConfigEntry(domain=DOMAIN, data=DATA, unique_id="studio-id")
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"scan_interval": interval}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["scan_interval"] == interval
 
 
 async def test_options_current_values(hass):

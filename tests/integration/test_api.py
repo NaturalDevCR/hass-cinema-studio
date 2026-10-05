@@ -11,6 +11,7 @@ from custom_components.cinema_studio.api import (
     StudioAuthError,
     StudioClient,
     StudioConnectionError,
+    StudioRequestError,
 )
 
 pytestmark = pytest.mark.integration
@@ -114,7 +115,7 @@ async def test_malformed_json(client, aioclient_mock, endpoint):
         await getattr(client, endpoint)()
 
 
-async def test_legacy_endpoints_and_long_timeout(hass, client, aioclient_mock):
+async def test_legacy_endpoints(client, aioclient_mock):
     stage = {"phase": "stage", "manifest": {}}
     commit = {"phase": "commit", "run_id": "run-1", "clips": []}
     aioclient_mock.post(f"{BASE}/import/legacy", json={"run_id": "run-1"})
@@ -123,8 +124,49 @@ async def test_legacy_endpoints_and_long_timeout(hass, client, aioclient_mock):
     aioclient_mock.post(f"{BASE}/import/legacy", json={"catalog_revision": 4})
     assert await client.legacy_commit(commit) == {"catalog_revision": 4}
     assert all(call[3]["X-Cinema-Consumer"] == "entry-1" for call in aioclient_mock.mock_calls)
-    assert all(
-        call[3]["timeout"].total == 1800
-        for call in aioclient_mock.mock_calls
-        if "timeout" in call[3]
-    )
+
+
+@pytest.mark.parametrize("operation", ["legacy_stage", "legacy_commit"])
+async def test_legacy_long_timeout(hass, client, aioclient_mock, operation):
+    aioclient_mock.post(f"{BASE}/import/legacy", json={"run_id": "run-1"})
+    with patch.object(
+        async_get_clientsession(hass), "_request", wraps=aioclient_mock.match_request
+    ) as request:
+        await getattr(client, operation)({"phase": "x"})
+    assert request.call_count == 1
+    assert request.call_args.kwargs["timeout"].total == 1800
+
+
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [(409, "another run is active"), (422, [{"loc": ["body"], "msg": "bad"}]), (400, "nope")],
+)
+async def test_request_error_with_detail(client, aioclient_mock, status, detail):
+    aioclient_mock.post(f"{BASE}/import/legacy", status=status, json={"detail": detail})
+    with pytest.raises(StudioRequestError) as err:
+        await client.legacy_commit({"phase": "commit"})
+    assert err.value.status == status
+    assert err.value.detail == detail
+    assert isinstance(err.value, StudioConnectionError)
+    assert not isinstance(err.value, StudioAuthError)
+
+
+@pytest.mark.parametrize("body", ["not json", json.dumps({"other": 1}), json.dumps([1])])
+async def test_4xx_without_detail_is_plain_connection_error(client, aioclient_mock, body):
+    aioclient_mock.post(f"{BASE}/selections", status=409, text=body)
+    with pytest.raises(StudioConnectionError) as err:
+        await client.post_selections([])
+    assert not isinstance(err.value, StudioRequestError)
+
+
+async def test_5xx_with_detail_is_plain_connection_error(client, aioclient_mock):
+    aioclient_mock.get(f"{BASE}/health", status=503, json={"detail": "starting"})
+    with pytest.raises(StudioConnectionError) as err:
+        await client.health()
+    assert not isinstance(err.value, StudioRequestError)
+
+
+async def test_304_only_valid_for_catalog(client, aioclient_mock):
+    aioclient_mock.get(f"{BASE}/health", status=304)
+    with pytest.raises(StudioConnectionError):
+        await client.health()

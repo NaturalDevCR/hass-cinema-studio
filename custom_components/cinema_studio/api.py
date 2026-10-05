@@ -15,6 +15,15 @@ class StudioAuthError(StudioConnectionError):
     """Studio rejected the API token."""
 
 
+class StudioRequestError(StudioConnectionError):
+    """Studio rejected the request with a 4xx status and a JSON ``detail``."""
+
+    def __init__(self, status: int, detail: Any) -> None:
+        super().__init__(f"Studio rejected the request (HTTP {status})")
+        self.status = status
+        self.detail = detail
+
+
 @dataclass(frozen=True)
 class CatalogResponse:
     data: dict[str, Any] | None
@@ -51,17 +60,21 @@ class StudioClient:
         return data
 
     async def catalog(self, etag: str | None = None) -> CatalogResponse:
-        return await self._request("GET", "catalog", etag=etag)
+        return await self._request("GET", "catalog", etag=etag, allow_not_modified=True)
 
     async def post_selections(self, events: list[dict[str, Any]]) -> None:
-        await self._request("POST", "selections", json_body={"events": events})
+        await self._request("POST", "selections", json_body={"events": events}, expected=204)
 
     async def legacy_stage(self, body: dict[str, Any]) -> dict[str, Any]:
-        result = await self._request("POST", "import/legacy", json_body=body, legacy=True)
-        return result.data or {}
+        return await self._legacy(body)
 
     async def legacy_commit(self, body: dict[str, Any]) -> dict[str, Any]:
-        result = await self._request("POST", "import/legacy", json_body=body, legacy=True)
+        return await self._legacy(body)
+
+    async def _legacy(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = await self._request(
+            "POST", "import/legacy", json_body=body, timeout=self._legacy_timeout
+        )
         return result.data or {}
 
     async def _request(
@@ -69,9 +82,11 @@ class StudioClient:
         method: str,
         path: str,
         *,
+        expected: int = 200,
+        allow_not_modified: bool = False,
         etag: str | None = None,
         json_body: dict[str, Any] | None = None,
-        legacy: bool = False,
+        timeout: aiohttp.ClientTimeout | None = None,
     ) -> CatalogResponse:
         headers = self._headers.copy()
         if etag is not None:
@@ -82,17 +97,19 @@ class StudioClient:
                 self._base_url / path,
                 headers=headers,
                 json=json_body,
-                timeout=self._legacy_timeout if legacy else self._timeout,
+                timeout=timeout or self._timeout,
                 allow_redirects=False,
             ) as response:
-                if response.status in (401, 403):
+                status = response.status
+                if status in (401, 403):
                     raise StudioAuthError("Studio rejected the API token")
-                if response.status == 304 and path == "catalog":
+                if status == 304 and allow_not_modified:
                     return CatalogResponse(None, response.headers.get("ETag", etag))
-                expected_status = 204 if path == "selections" else 200
-                if response.status != expected_status:
-                    raise StudioConnectionError(f"Studio returned HTTP {response.status}")
-                if response.status == 204:
+                if status != expected:
+                    if 400 <= status < 500:
+                        await _raise_for_detail(response, status)
+                    raise StudioConnectionError(f"Studio returned HTTP {status}")
+                if status == 204:
                     return CatalogResponse(None, None)
                 data: Any = await response.json()
                 if not isinstance(data, dict):
@@ -100,3 +117,13 @@ class StudioClient:
                 return CatalogResponse(cast(dict[str, Any], data), response.headers.get("ETag"))
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
             raise StudioConnectionError("Unable to contact Studio") from err
+
+
+async def _raise_for_detail(response: aiohttp.ClientResponse, status: int) -> None:
+    """Raise StudioRequestError when a 4xx body is a JSON object with a detail."""
+    try:
+        body: Any = await response.json()
+    except (aiohttp.ClientError, ValueError):
+        return
+    if isinstance(body, dict) and "detail" in body:
+        raise StudioRequestError(status, cast(dict[str, Any], body)["detail"])
