@@ -17,7 +17,7 @@ export const makeState = (): State => ({
   consumers: [],
   legacy_import: null,
   settings: {
-    max_upload_mb: 2048,
+    max_upload_mb: 4096,
     max_duration_s: 7200,
     default_lead_in: 2,
     default_tail_out: 2,

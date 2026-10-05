@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { filterClips, foldText, loudnessSpread, type ClipFilter } from "@/lib/filters";
-import { makeClip, makeRender, makeSeason } from "@/test/factories";
+import { makeClip, makeRender } from "@/test/factories";
 
-const none: ClipFilter = { collectionId: null, seasonId: null, query: "", status: null };
+const none: ClipFilter = { collectionId: null, seasonId: null, seasonCollectionId: null, query: "", status: null };
 const ids = (clips: { id: string }[]) => clips.map((c) => c.id);
 
 describe("foldText", () => {
@@ -17,10 +17,6 @@ describe("filterClips", () => {
     makeClip({ id: "b", title: "Tráiler de la puerta", collection_id: "doors", source_name: "doorbell.mp4" }),
     makeClip({ id: "c", title: "Jingle", collection_id: "christmas", status: "failed" }),
     makeClip({ id: "d", title: "Fanfare", collection_id: "regular", status: "rendering" }),
-  ];
-  const seasons = [
-    makeSeason({ id: "xmas", collection_id: "christmas" }),
-    makeSeason({ id: "regular", collection_id: "regular", builtin: true }),
   ];
 
   it("returns everything for an empty filter, keeping the order", () => {
@@ -45,21 +41,21 @@ describe("filterClips", () => {
     expect(ids(filterClips(all, { ...none, status: "failed" }))).toEqual(["c"]);
   });
 
-  it("filters by the collection a season plays", () => {
-    expect(ids(filterClips(all, { ...none, seasonId: "xmas" }, seasons))).toEqual(["c"]);
-    expect(ids(filterClips(all, { ...none, seasonId: "regular" }, seasons))).toEqual(["d"]);
+  it("filters by the collection the caller resolved for the season", () => {
+    expect(ids(filterClips(all, { ...none, seasonId: "xmas", seasonCollectionId: "christmas" }))).toEqual(["c"]);
+    expect(ids(filterClips(all, { ...none, seasonId: "regular", seasonCollectionId: "regular" }))).toEqual(["d"]);
   });
 
-  it("matches nothing for a season that does not exist", () => {
-    expect(filterClips(all, { ...none, seasonId: "gone" }, seasons)).toEqual([]);
+  it("applies no season constraint when no collection was resolved", () => {
+    expect(ids(filterClips(all, { ...none, seasonId: "xmas", seasonCollectionId: null }))).toEqual(["a", "b", "c", "d"]);
   });
 
   it("combines filters with AND", () => {
     expect(filterClips(all, { ...none, collectionId: "animals", status: "failed" })).toEqual([]);
-    expect(ids(filterClips(all, { ...none, seasonId: "xmas", collectionId: "christmas", query: "jin" }, seasons))).toEqual([
-      "c",
-    ]);
-    expect(filterClips(all, { ...none, seasonId: "xmas", collectionId: "doors" }, seasons)).toEqual([]);
+    expect(
+      ids(filterClips(all, { ...none, seasonId: "xmas", seasonCollectionId: "christmas", collectionId: "christmas", query: "jin" })),
+    ).toEqual(["c"]);
+    expect(filterClips(all, { ...none, seasonId: "xmas", seasonCollectionId: "christmas", collectionId: "doors" })).toEqual([]);
   });
 });
 

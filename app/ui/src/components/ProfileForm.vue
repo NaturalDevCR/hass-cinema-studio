@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { ref, useId, watch } from "vue";
 import { messageOf, ui } from "@/api/client";
-import type { Affected, NormalizationProfile } from "@/api/types";
+import type { NormalizationProfile } from "@/api/types";
 import { formatDb, formatLufs } from "@/lib/format";
 import { useI18n } from "@/i18n";
 import { useStudio } from "@/composables/useStudio";
 import { useJobs } from "@/composables/useJobs";
 import { useToast } from "@/composables/useToast";
-import { useConfirm } from "@/composables/useConfirm";
 const props = defineProps<{ profile?: NormalizationProfile }>();
 const emit = defineEmits<{
   saved: [profile: NormalizationProfile];
@@ -31,8 +30,6 @@ const controls = [
 ] as const;
 const pending = ref(false);
 const error = ref<string | null>(null);
-// A failed apply retries the saved change without PATCHing the same profile again.
-const saved = ref<Affected<"profile", NormalizationProfile> | null>(null);
 watch(pending, (value) => emit("busy", value), { flush: "sync" });
 async function submit(): Promise<void> {
   if (pending.value) return;
@@ -55,28 +52,15 @@ async function submit(): Promise<void> {
   pending.value = true;
   error.value = null;
   try {
-    if (!saved.value) {
-      const body = { name: name.value.trim(), ...values.value };
-      saved.value = props.profile
-        ? await ui.normProfiles.update(props.profile.id, body)
-        : { profile: await ui.normProfiles.create(body), affected_clip_ids: [] };
-      await useStudio().refresh();
-      useToast().push(t("organize.saved"), "success");
-    }
-    const { profile, affected_clip_ids } = saved.value;
-    if (
-      affected_clip_ids.length &&
-      (await useConfirm().confirm({
-        title: tp("profile.rerender", affected_clip_ids.length),
-        message: t("profile.rerender.message"),
-        confirmLabel: t("common.apply"),
-      }))
-    ) {
-      const { queued } = await ui.normProfiles.apply(profile.id, {
-        clip_ids: affected_clip_ids,
-      });
-      await Promise.all([useStudio().refresh(), useJobs().refresh()]);
-      useToast().push(tp("profile.queued", queued), "success");
+    const body = { name: name.value.trim(), ...values.value };
+    // The server marks the affected clips pending and queues their renders on PATCH.
+    const { profile, affected_clip_ids } = props.profile
+      ? await ui.normProfiles.update(props.profile.id, body)
+      : { profile: await ui.normProfiles.create(body), affected_clip_ids: [] as string[] };
+    await Promise.all([useStudio().refresh(), useJobs().refresh()]);
+    useToast().push(t("organize.saved"), "success");
+    if (affected_clip_ids.length) {
+      useToast().push(tp("profile.rerendering", affected_clip_ids.length), "success");
     }
     emit("saved", profile);
   } catch (cause) {
@@ -88,7 +72,7 @@ async function submit(): Promise<void> {
 </script>
 <template>
   <form class="space-y-5" novalidate :aria-busy="pending" @submit.prevent="submit">
-    <fieldset :disabled="pending || saved !== null" class="min-w-0 space-y-5">
+    <fieldset :disabled="pending" class="min-w-0 space-y-5">
       <div>
         <label :for="`${id}-name`" class="mb-1.5 block text-sm font-medium">{{ t("form.name") }}</label
         ><input :id="`${id}-name`" v-model="name" data-test="name" class="field" required maxlength="120" />
@@ -130,7 +114,7 @@ async function submit(): Promise<void> {
       {{ error }}
     </p>
     <button type="submit" class="btn-primary w-full" :disabled="pending">
-      {{ pending ? t("common.loading") : error && saved ? t("common.retry") : t("common.save") }}
+      {{ pending ? t("common.loading") : t("common.save") }}
     </button>
   </form>
 </template>

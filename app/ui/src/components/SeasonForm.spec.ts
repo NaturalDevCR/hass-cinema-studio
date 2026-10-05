@@ -87,3 +87,25 @@ it("only patches name, color and icon for regular", async () => {
   });
   update.mockRestore();
 });
+
+it("defaults the collection once the collections finish loading", async () => {
+  useStudio().collections.value = [];
+  const create = vi.spyOn(ui.seasons, "create").mockResolvedValue(makeSeason({ id: "new" }));
+  const w = mount(SeasonForm);
+  await w.get('[data-test="name"]').setValue("Winter");
+  useStudio().collections.value = collections;
+  await flushPromises();
+  expect((w.get('[data-test="collection"]').element as HTMLSelectElement).value).toBe("regular");
+  await w.get("form").trigger("submit");
+  await flushPromises();
+  expect(create).toHaveBeenCalledWith(expect.objectContaining({ collection_id: "regular" }));
+  create.mockRestore();
+});
+
+it("keeps a collection the user already picked when the list refreshes", async () => {
+  const w = mount(SeasonForm);
+  await w.get('[data-test="collection"]').setValue("horror");
+  useStudio().collections.value = [...collections];
+  await flushPromises();
+  expect((w.get('[data-test="collection"]').element as HTMLSelectElement).value).toBe("horror");
+});

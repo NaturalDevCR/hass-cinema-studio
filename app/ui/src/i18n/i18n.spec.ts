@@ -54,13 +54,12 @@ describe("useI18n", () => {
   });
 
   it("picks the singular for exactly one and the plural otherwise", () => {
-    expect(translatePlural("profile.queued", 1)).toBe("1 clip queued for rendering");
-    expect(translatePlural("profile.queued", 0)).toBe("0 clips queued for rendering");
-    expect(translatePlural("profile.queued", 12)).toBe("12 clips queued for rendering");
-    expect(useI18n().tp("profile.rerender", 3)).toBe("Re-render 3 clips now?");
+    expect(translatePlural("profile.rerendering", 1)).toBe("1 clip will be re-rendered");
+    expect(translatePlural("profile.rerendering", 0)).toBe("0 clips will be re-rendered");
+    expect(translatePlural("profile.rerendering", 12)).toBe("12 clips will be re-rendered");
     useI18n().setLocale("es");
-    expect(translatePlural("profile.queued", 1)).toBe("1 clip en cola para renderizar");
-    expect(translatePlural("profile.queued", 2)).toBe("2 clips en cola para renderizar");
+    expect(translatePlural("profile.rerendering", 1)).toBe("1 clip se volverá a renderizar");
+    expect(translatePlural("profile.rerendering", 2)).toBe("2 clips se volverán a renderizar");
   });
 
   it("names the app and sections for video", () => {

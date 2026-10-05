@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 let playImpl: () => Promise<void> = async () => undefined;
 let play: ReturnType<typeof vi.spyOn>;
 let pause: ReturnType<typeof vi.spyOn>;
+let loadSpy: ReturnType<typeof vi.spyOn>;
 
 async function load() {
   vi.resetModules();
@@ -15,6 +16,7 @@ beforeEach(() => {
   playImpl = async () => undefined;
   play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => playImpl());
   pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+  loadSpy = vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => undefined);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -41,13 +43,44 @@ describe("usePlayer", () => {
     expect(player.playing.value).toBe(true);
   });
 
-  it("toggling the playing clip stops it", async () => {
+  it("toggling the playing clip pauses it in place and keeps it selected", async () => {
     const { player } = await load();
     player.toggle("c1", "u1");
+    const video = player.element();
+    video.currentTime = 12;
+    play.mockClear();
     player.toggle("c1", "u1");
     expect(pause).toHaveBeenCalled();
     expect(player.playing.value).toBe(false);
-    expect(player.currentId.value).toBeNull();
+    expect(player.currentId.value).toBe("c1");
+    expect(video.getAttribute("src")).toBe("u1");
+    expect(video.currentTime).toBe(12);
+    expect(loadSpy).not.toHaveBeenCalled();
+  });
+
+  it("toggling a paused clip resumes it without rewinding or reloading the source", async () => {
+    const { player } = await load();
+    player.toggle("c1", "u1");
+    const video = player.element();
+    video.currentTime = 12;
+    player.toggle("c1", "u1"); // pause
+    play.mockClear();
+    player.toggle("c1", "u1"); // resume
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(player.playing.value).toBe(true);
+    expect(player.currentId.value).toBe("c1");
+    expect(video.getAttribute("src")).toBe("u1");
+    expect(video.currentTime).toBe(12);
+  });
+
+  it("resumes after an external pause too", async () => {
+    const { player } = await load();
+    player.toggle("c1", "u1");
+    player.element().dispatchEvent(new Event("pause"));
+    play.mockClear();
+    player.toggle("c1", "u1");
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(player.playing.value).toBe(true);
   });
 
   it("switches sources on the same element, silencing the previous clip", async () => {
@@ -89,12 +122,15 @@ describe("usePlayer", () => {
     expect(player.currentId.value).toBe("c1");
   });
 
-  it("stop() pauses, rewinds, detaches the element and clears state", async () => {
+  it("stop() pauses, rewinds, drops the source, detaches the element and clears state", async () => {
     const { player } = await load();
     const host = document.createElement("div");
     player.toggle("c1", "u1", host);
     player.stop();
     expect(pause).toHaveBeenCalled();
+    expect(player.element().hasAttribute("src")).toBe(false);
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+    expect(player.element().currentTime).toBe(0);
     expect(player.currentId.value).toBeNull();
     expect(player.playing.value).toBe(false);
     expect(host.contains(player.element())).toBe(false);

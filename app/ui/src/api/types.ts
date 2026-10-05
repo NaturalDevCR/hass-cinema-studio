@@ -302,7 +302,6 @@ export type ClipPatch = Partial<Pick<Clip, "title" | "collection_id" | "enabled"
 export type BulkSet = {
   collection_id?: string;
   enabled?: boolean;
-  /** Key present => set the normalization override and queue a render; `null` clears it. */
   profile_id?: string | null;
 };
 export type BulkBody = { ids: string[]; set: BulkSet };

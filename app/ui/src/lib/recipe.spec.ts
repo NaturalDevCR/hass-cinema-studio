@@ -3,7 +3,7 @@ import { defaultRecipe, recipesEqual, trimmedLength, validateRecipe } from "@/li
 import type { OriginalInfo, Recipe, Settings } from "@/api/types";
 
 const settings: Settings = {
-  max_upload_mb: 2048,
+  max_upload_mb: 4096,
   max_duration_s: 7200,
   default_lead_in: 1.5,
   default_tail_out: 2.5,

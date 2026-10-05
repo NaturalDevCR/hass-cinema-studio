@@ -33,7 +33,6 @@ export const en = {
   "common.none": "None",
   "common.all": "All",
   "common.search": "Search",
-  "common.apply": "Apply",
 
   // --- confirm dialog (defaults) ------------------------------------------
   "confirm.title": "Are you sure?",
@@ -174,11 +173,8 @@ export const en = {
   "profile.lra.hint":
     "Controls the difference between quiet and loud passages. Lower values give a steadier volume.",
   "profile.invalid": "Keep LUFS between −30 and −5, peak between −9 and 0, and range between 1 and 20.",
-  "profile.rerender.one": "Re-render 1 clip now?",
-  "profile.rerender.other": "Re-render {n} clips now?",
-  "profile.rerender.message": "The profile is saved. Apply its new volume settings to the clips that use it?",
-  "profile.queued.one": "1 clip queued for rendering",
-  "profile.queued.other": "{n} clips queued for rendering",
+  "profile.rerendering.one": "1 clip will be re-rendered",
+  "profile.rerendering.other": "{n} clips will be re-rendered",
   "month.1": "Jan",
   "month.2": "Feb",
   "month.3": "Mar",

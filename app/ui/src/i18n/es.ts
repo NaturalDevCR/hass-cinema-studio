@@ -34,7 +34,6 @@ export const es: Record<keyof typeof en, string> = {
   "common.none": "Ninguno",
   "common.all": "Todos",
   "common.search": "Buscar",
-  "common.apply": "Aplicar",
 
   // --- confirm dialog (defaults) ------------------------------------------
   "confirm.title": "¿Estás seguro?",
@@ -178,12 +177,8 @@ export const es: Record<keyof typeof en, string> = {
   "profile.lra.hint":
     "Controla la diferencia entre las partes suaves y fuertes. Un valor menor da un volumen más uniforme.",
   "profile.invalid": "Mantén LUFS entre −30 y −5, el pico entre −9 y 0 y el rango entre 1 y 20.",
-  "profile.rerender.one": "¿Volver a renderizar 1 clip ahora?",
-  "profile.rerender.other": "¿Volver a renderizar {n} clips ahora?",
-  "profile.rerender.message":
-    "El perfil está guardado. ¿Aplicar los nuevos ajustes de volumen a los clips que lo usan?",
-  "profile.queued.one": "1 clip en cola para renderizar",
-  "profile.queued.other": "{n} clips en cola para renderizar",
+  "profile.rerendering.one": "1 clip se volverá a renderizar",
+  "profile.rerendering.other": "{n} clips se volverán a renderizar",
   "month.1": "Ene",
   "month.2": "Feb",
   "month.3": "Mar",

@@ -18,6 +18,14 @@ const regular = props.season?.id === "regular";
 // A season plays one collection; the built-in Regular season keeps its own and is not editable here.
 const { collections } = useStudio();
 const collectionId = ref(props.season?.collection_id ?? collections.value[0]?.id ?? "");
+// Collections may still be loading when the form opens: pick the first one as soon as it arrives.
+watch(
+  collections,
+  (list) => {
+    if (!collectionId.value && list[0]) collectionId.value = list[0].id;
+  },
+  { flush: "sync" },
+);
 const name = ref(props.season?.name ?? "");
 const color = ref(props.season?.color ?? "#34d399");
 const colorValid = ref(true);

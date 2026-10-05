@@ -12,12 +12,16 @@ vi.mock("@/composables/useStudio", async (original) => {
   };
 });
 import { mount, flushPromises } from "@vue/test-utils";
-import { it, expect, vi } from "vitest";
+import { beforeEach, it, expect, vi } from "vitest";
 import ProfileForm from "./ProfileForm.vue";
 import { useConfirm } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 import { ui } from "@/api/client";
 import { makeNormProfile } from "@/test/factories";
-it.each([true, false])("confirms re-render after PATCH (answer %s)", async (answer) => {
+beforeEach(() => {
+  useToast().toasts.value = [];
+});
+it("saves via PATCH and toasts how many clips the server re-renders, without a confirm step", async () => {
   const profile = makeNormProfile({ id: "soft" });
   const update = vi.spyOn(ui.normProfiles, "update").mockResolvedValue({ profile, affected_clip_ids: ["a", "b"] });
   const apply = vi.spyOn(ui.normProfiles, "apply").mockResolvedValue({ queued: 2 });
@@ -25,15 +29,22 @@ it.each([true, false])("confirms re-render after PATCH (answer %s)", async (answ
   await w.get("form").trigger("submit");
   await flushPromises();
   expect(update).toHaveBeenCalledWith("soft", expect.objectContaining({ target_lufs: -16 }));
-  expect(useConfirm().request.value?.title).toContain("2");
+  expect(useConfirm().request.value).toBeNull();
   expect(apply).not.toHaveBeenCalled();
-  useConfirm().answer(answer);
-  await flushPromises();
-  if (answer) expect(apply).toHaveBeenCalledWith("soft", { clip_ids: ["a", "b"] });
-  else expect(apply).not.toHaveBeenCalled();
+  expect(useToast().toasts.value.map((t) => t.message)).toContain("2 clips will be re-rendered");
   expect(w.emitted("saved")).toHaveLength(1);
   update.mockRestore();
   apply.mockRestore();
+});
+it("does not announce a re-render when no clip is affected", async () => {
+  const profile = makeNormProfile({ id: "soft" });
+  const update = vi.spyOn(ui.normProfiles, "update").mockResolvedValue({ profile, affected_clip_ids: [] });
+  const w = mount(ProfileForm, { props: { profile } });
+  await w.get("form").trigger("submit");
+  await flushPromises();
+  expect(useToast().toasts.value.some((t) => /re-rendered/.test(t.message))).toBe(false);
+  expect(w.emitted("saved")).toHaveLength(1);
+  update.mockRestore();
 });
 it("rejects blank names and out-of-range loudness", async () => {
   const create = vi.spyOn(ui.normProfiles, "create");
@@ -46,29 +57,22 @@ it("rejects blank names and out-of-range loudness", async () => {
   expect(create).not.toHaveBeenCalled();
   create.mockRestore();
 });
-it("shows apply failure inline and retries without PATCHing the saved profile again", async () => {
+it("shows a save failure inline and allows retrying", async () => {
   const profile = makeNormProfile({ id: "soft" });
-  const update = vi.spyOn(ui.normProfiles, "update").mockResolvedValue({ profile, affected_clip_ids: ["a"] });
-  const apply = vi
-    .spyOn(ui.normProfiles, "apply")
-    .mockRejectedValueOnce(new Error("render unavailable"))
-    .mockResolvedValue({ queued: 1 });
+  const update = vi
+    .spyOn(ui.normProfiles, "update")
+    .mockRejectedValueOnce(new Error("disk full"))
+    .mockResolvedValue({ profile, affected_clip_ids: [] });
   const w = mount(ProfileForm, { props: { profile } });
   await w.get("form").trigger("submit");
   await flushPromises();
-  useConfirm().answer(true);
-  await flushPromises();
-  expect(w.get('[role="alert"]').text()).toBe("render unavailable");
+  expect(w.get('[role="alert"]').text()).toBe("disk full");
   expect(w.emitted("saved")).toBeUndefined();
   await w.get("form").trigger("submit");
   await flushPromises();
-  useConfirm().answer(true);
-  await flushPromises();
-  expect(update).toHaveBeenCalledTimes(1);
-  expect(apply).toHaveBeenCalledTimes(2);
+  expect(update).toHaveBeenCalledTimes(2);
   expect(w.emitted("saved")).toHaveLength(1);
   update.mockRestore();
-  apply.mockRestore();
 });
 
 it("names every profile slider and announces the formatted values from the number inputs", async () => {

@@ -1,8 +1,15 @@
-import type { Clip, ClipStatus, Season } from "@/api/types";
+import type { Clip, ClipStatus } from "@/api/types";
 
 export type ClipFilter = {
   collectionId: string | null;
+  /** The selected season (UI identity only; it does not filter by itself). */
   seasonId: string | null;
+  /**
+   * The collection the selected season plays, resolved by the caller (e.g. from
+   * `useStudio().seasonById(seasonId)?.collection_id`). When non-null the clips are restricted
+   * to that collection; null means no season constraint.
+   */
+  seasonCollectionId: string | null;
   query: string;
   status: ClipStatus | null;
 };
@@ -14,15 +21,14 @@ export function foldText(text: string): string {
 
 /**
  * Applies every active filter (AND). The query is split into words that must all appear in
- * the title or the source file name. A season filter keeps the clips of the collection that
- * season plays, so `seasons` has to be passed along with it; an unknown season matches nothing.
+ * the title or the source file name. The season filter is the explicit `seasonCollectionId`
+ * the caller resolved, so nothing is looked up (or silently dropped) in here.
  */
-export function filterClips(clips: Clip[], f: ClipFilter, seasons: Season[] = []): Clip[] {
+export function filterClips(clips: Clip[], f: ClipFilter): Clip[] {
   const words = foldText(f.query).split(/\s+/).filter(Boolean);
-  const seasonCollection = f.seasonId === null ? null : (seasons.find((s) => s.id === f.seasonId)?.collection_id ?? "");
   return clips.filter((c) => {
     if (f.collectionId !== null && c.collection_id !== f.collectionId) return false;
-    if (seasonCollection !== null && c.collection_id !== seasonCollection) return false;
+    if (f.seasonCollectionId !== null && c.collection_id !== f.seasonCollectionId) return false;
     if (f.status !== null && c.status !== f.status) return false;
     if (words.length) {
       const haystack = foldText(`${c.title} ${c.source_name}`);
