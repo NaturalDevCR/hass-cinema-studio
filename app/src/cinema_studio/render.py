@@ -228,20 +228,38 @@ class RenderEngine:
                     )
                 )
                 plan = replace(plan, final_loudness=final)
-            _, stderr = await run_process(
-                self.builder.build(plan, measured), timeout=timeout, on_line=progress
+            enforce_peak = not plan.preview and (
+                profile.loudness.mode != "disabled" or plan.recipe.gain_db > 0
             )
-            stderr_tail = stderr.decode(errors="replace")[-1000:]
-            info = await probe(plan.output)
-            if not valid_output(info, profile):
-                raise MediaError(
-                    "compiled output has invalid dimensions, fps, audio or A/V synchronization"
+            ceiling = (
+                profile.loudness.true_peak_dbtp if profile.loudness.mode == "two_pass" else -1.5
+            )
+            # Check the actual encoded audio, including AAC reconstruction peaks.
+            # At most two corrections reuse calibration and preserve the recipe.
+            correction = 0
+            while True:
+                _, stderr = await run_process(
+                    self.builder.build(plan, measured), timeout=timeout, on_line=progress
                 )
-            timing = compiled_timing(plan, info)
+                stderr_tail = stderr.decode(errors="replace")[-1000:]
+                info = await probe(plan.output)
+                if not valid_output(info, profile):
+                    raise MediaError(
+                        "compiled output has invalid dimensions, fps, audio or A/V synchronization"
+                    )
+                timing = compiled_timing(plan, info)
+                lufs, peak = await measure_loudness(
+                    plan.output, start=timing.content_start, end=timing.content_end
+                )
+                if not enforce_peak or peak is None or peak <= ceiling + 0.3:
+                    break
+                if correction == 2:
+                    raise MediaError("true peak above ceiling")
+                plan = replace(
+                    plan, peak_reduction_db=(plan.peak_reduction_db + peak - ceiling + 0.2)
+                )
+                correction += 1
             digest = await file_sha256(plan.output)
-            lufs, peak = await measure_loudness(
-                plan.output, start=timing.content_start, end=timing.content_end
-            )
             assets: dict[str, object] = {}
             for name, path in (("intro", plan.intro), ("outro", plan.outro)):
                 if path is not None:

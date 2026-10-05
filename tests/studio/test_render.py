@@ -363,3 +363,138 @@ async def test_hard_link_output_preserves_inputs(
         await engine().render(p)
     assert original.read_bytes() == before
     assert p.output.exists() and p.output.samefile(original)
+
+
+@pytest.mark.parametrize(
+    "peaks,reductions,fails,mode",
+    [
+        ([-1.11, -1.4], [0, 0.59], False, "normal"),
+        ([-0.5, -1, -1.3], [0, 1.2, 1.9], False, "normal"),
+        ([-0.5, -0.5, -0.5], [0, 1.2, 2.4], True, "normal"),
+        ([-1.2], [0], False, "normal"),
+        ([None], [0], False, "normal"),
+        ([-0.5], [0], False, "preview"),
+        ([-1.11, -1.4], [0, 0.59], False, "disabled"),
+        ([-0.5], [0], False, "disabled_no_gain"),
+    ],
+)
+async def test_encoded_peak_correction_is_bounded(
+    tmp_path, small_profile_settings, monkeypatch, peaks, reductions, fails, mode
+):
+    import cinema_studio.render as render_module
+
+    settings = dict(
+        small_profile_settings,
+        audio={"missing_policy": {"mode": "silence"}},
+        loudness={
+            "mode": "two_pass",
+            "integrated_lufs": -18,
+            "true_peak_dbtp": -1.5,
+            "lra_lu": 11,
+            "final_mix_normalization": False,
+        },
+    )
+    if mode.startswith("disabled"):
+        settings["loudness"] = {"mode": "disabled"}
+    src = tmp_path / "source.mp4"
+    src.write_bytes(b"source")
+    p = make_plan(
+        src,
+        tmp_path,
+        settings,
+        preview=mode == "preview",
+        recipe=Recipe(gain_db=0 if mode == "disabled_no_gain" else 24),
+    )
+    builds = []
+    measured_regions = []
+    remaining_peaks = iter(peaks)
+
+    class Spy(FfmpegCommandBuilder):
+        def build(self, plan, measured):
+            builds.append(plan)
+            return super().build(plan, measured)
+
+    async def fake_probe(path):
+        duration = 4 if path == src else 8
+        return MediaProbe(True, duration, duration, duration, 320, 180, 24, path != src, "h264")
+
+    async def fake_run(argv, **kwargs):
+        p.output.write_bytes(f"encode-{len(builds)}".encode())
+        return b"", b""
+
+    async def fake_measure(path, *, start, end):
+        measured_regions.append((path, start, end))
+        return -18, next(remaining_peaks)
+
+    monkeypatch.setattr(render_module, "probe", fake_probe)
+    monkeypatch.setattr(render_module, "run_process", fake_run)
+    monkeypatch.setattr(render_module, "measure_loudness", fake_measure)
+    if fails:
+        with pytest.raises(MediaError, match="true peak above ceiling"):
+            await engine(Spy()).render(p)
+        assert not p.output.exists()
+    else:
+        out = await engine(Spy()).render(p)
+        assert out.true_peak == peaks[-1]
+        import hashlib
+
+        assert out.sha256 == hashlib.sha256(p.output.read_bytes()).hexdigest()
+    assert len(builds) == len(reductions)
+    assert [plan.peak_reduction_db for plan in builds] == pytest.approx(reductions)
+    assert measured_regions == [(p.output, 2, 6)] * len(reductions)
+
+
+async def test_high_gain_aac_output_meets_measured_peak_ceiling(
+    make_video, small_profile_settings, tmp_path
+):
+    from cinema_studio.media import measure_loudness
+
+    video = make_video(seconds=4)
+    source = tmp_path / "multiple-tones.mp4"
+    await run_process(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(video),
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=0.3*sin(2*PI*997*t)+0.3*sin(2*PI*1499*t):s=48000:d=4",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(source),
+        ]
+    )
+    settings = dict(small_profile_settings, audio={"bitrate_kbps": 64})
+    p = make_plan(source, tmp_path, settings, recipe=Recipe(gain_db=24))
+    out = await engine().render(p)
+    codecs, _ = await run_process(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            str(out.path),
+        ]
+    )
+    assert codecs.strip() == b"aac"
+    _, peak = await measure_loudness(
+        out.path, start=out.timing.content_start, end=out.timing.content_end
+    )
+    assert peak is not None and peak <= -1.5 + 0.3
+    assert out.true_peak == peak

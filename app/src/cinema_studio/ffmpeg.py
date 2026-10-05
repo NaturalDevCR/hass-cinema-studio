@@ -51,6 +51,7 @@ class RenderPlan:
     source_silent: bool = False
     intro_silent: bool = False
     outro_silent: bool = False
+    peak_reduction_db: float = 0.0
 
 
 def effective_profile(plan: RenderPlan) -> ProcessingProfile:
@@ -275,9 +276,12 @@ class FfmpegCommandBuilder:
             peak = profile.loudness.true_peak_dbtp if profile.loudness.mode == "two_pass" else -1.5
             # Limit reconstructed peaks after every gain/normalization stage. Leave
             # encoding headroom for resampling and AAC reconstruction overshoot.
-            limit = 10 ** ((peak - 0.5) / 20)
+            # Also lower the limiter threshold: attenuating a saturated signal
+            # alone can leave it pinned to the original limit on every retry.
+            limit = 10 ** ((peak - 0.5 - plan.peak_reduction_db) / 20)
             graph.append(
-                f"[{audio_label}]aresample={profile.audio.sample_rate * 4},"
+                f"[{audio_label}]volume={-plan.peak_reduction_db:g}dB,"
+                f"aresample={profile.audio.sample_rate * 4},"
                 f"alimiter=limit={limit:.8f}:level=false:latency=true,"
                 f"aresample={profile.audio.sample_rate},asettb=1/{profile.audio.sample_rate},"
                 "asetpts=N/SR/TB[a_limited]"

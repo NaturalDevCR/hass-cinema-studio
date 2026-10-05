@@ -134,3 +134,10 @@ def test_preview_size_quality_and_no_loudnorm(tmp_path):
     assert argv[argv.index("-crf") + 1] == "28"
     assert argv[argv.index("-preset") + 1] == "veryfast"
     assert "loudnorm=" not in graph(p)
+
+
+def test_peak_correction_follows_normalization_and_precedes_limiter(tmp_path):
+    p = plan(tmp_path, recipe=Recipe(gain_db=24), final_loudness=LoudnessStats(-24, -20, 1, -34, 0))
+    p = replace(p, peak_reduction_db=0.59)
+    g = graph(p)
+    assert g.rindex("loudnorm=") < g.index("volume=-0.59dB") < g.rindex("alimiter=")
