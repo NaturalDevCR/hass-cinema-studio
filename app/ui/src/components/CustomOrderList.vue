@@ -1,0 +1,9 @@
+<script setup lang="ts">
+import { ref, watch } from "vue"; import type { Clip } from "@/api/types"; import { ui } from "@/api/client"; import { useI18n } from "@/i18n";
+const props = defineProps<{ collectionId: string; clips: Clip[] }>(); const emit = defineEmits<{ "update:order": [ids: string[]] }>(); const ids = ref(props.clips.map(c => c.id)); const { t } = useI18n();
+watch(() => props.clips, clips => { ids.value = clips.map(c => c.id); }, { deep: true });
+async function persist(next: string[]) { ids.value = next; emit('update:order', next); await ui.collections.order(props.collectionId, next); }
+async function move(index: number, delta: number) { const target = index + delta; if (target < 0 || target >= ids.value.length) return; const next = [...ids.value]; [next[index], next[target]] = [next[target]!, next[index]!]; await persist(next); }
+function drop(index: number, event: DragEvent) { const from = Number(event.dataTransfer?.getData('text/plain')); if (!Number.isInteger(from) || from === index) return; const next = [...ids.value]; const [moved] = next.splice(from, 1); next.splice(index, 0, moved!); void persist(next); }
+</script>
+<template><ol class="space-y-1"><li v-for="(id, index) in ids" :key="id" draggable="true" class="flex items-center gap-2 rounded-lg border border-line p-2" @dragstart="e => e.dataTransfer?.setData('text/plain', String(index))" @dragover.prevent @drop="drop(index, $event)"><span aria-label="Position" class="w-7 text-center text-muted">{{ index + 1 }}</span><span class="cursor-grab" aria-label="Drag handle">⠿</span><span class="min-w-0 flex-1 truncate">{{ clips.find(c => c.id === id)?.title ?? id }}</span><button :data-test="`up-${id}`" class="btn" :aria-label="t('library.moveUp')" :disabled="index === 0" @click="move(index, -1)">↑</button><button :data-test="`down-${id}`" class="btn" :aria-label="t('library.moveDown')" :disabled="index === ids.length - 1" @click="move(index, 1)">↓</button></li></ol></template>

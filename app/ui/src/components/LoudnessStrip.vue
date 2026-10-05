@@ -1,0 +1,5 @@
+<script setup lang="ts">
+import type { Clip } from "@/api/types"; import { loudnessSpread } from "@/lib/filters"; import { useI18n } from "@/i18n"; import { formatLufs } from "@/lib/format";
+const props = defineProps<{ clips: Clip[]; collectionName: string }>(); const emit = defineEmits<{ level: [] }>(); const { t } = useI18n();
+</script>
+<template><section v-if="clips.filter(c => c.render?.integrated_lufs !== null && c.render?.integrated_lufs !== undefined).length >= 2" class="panel flex items-center gap-4 p-3"><div class="flex-1 text-sm">{{ collectionName }} · {{ t('library.spread', { spread: loudnessSpread(clips)?.spread.toFixed(1) ?? '0.0' }) }}<div class="mt-1 flex gap-1"><i v-for="clip in clips.filter(c => c.render?.integrated_lufs !== null && c.render?.integrated_lufs !== undefined)" :key="clip.id" class="h-2 flex-1 rounded bg-accent" :title="formatLufs(clip.render?.integrated_lufs ?? null)" /></div></div><button class="btn" @click="emit('level')">{{ t('library.level') }}</button></section></template>
