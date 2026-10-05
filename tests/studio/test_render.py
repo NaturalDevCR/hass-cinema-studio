@@ -325,3 +325,41 @@ async def test_positive_gain_true_peak_after_fades(make_video, small_profile_set
     )
     out = await engine().render(p)
     assert out.true_peak is not None and out.true_peak <= -1.3
+
+
+async def test_final_normalization_cannot_amplify_limited_peaks(
+    make_video, small_profile_settings, tmp_path
+):
+    from cinema_studio.ffmpeg import LoudnessStats
+    from cinema_studio.media import measure_loudness
+
+    p = make_plan(
+        make_video(seconds=4, volume_db=-30),
+        tmp_path,
+        small_profile_settings,
+        recipe=Recipe(gain_db=24, fade_in=0, fade_out=0, lead_in=0, tail_out=0),
+        final_loudness=LoudnessStats(-24, -20, 1, -34, 0),
+    )
+    # Calibration excludes gain: final normalization amplifies the already limited signal.
+    argv = FfmpegCommandBuilder().build(p, LoudnessStats(-51, -48, 1, -61, 0))
+    await run_process(argv)
+    _, peak = await measure_loudness(p.output)
+    assert peak is not None and peak <= -1.5 + 0.3
+
+
+@pytest.mark.parametrize("aliased_input", ["source", "intro", "outro"])
+async def test_hard_link_output_preserves_inputs(
+    make_video, small_profile_settings, tmp_path, aliased_input
+):
+    src = make_video(seconds=2)
+    asset = make_video(name="asset.mp4", seconds=2)
+    p = make_plan(src, tmp_path, small_profile_settings, preview=True)
+    original = src if aliased_input == "source" else asset
+    if aliased_input != "source":
+        p = replace(p, **{aliased_input: asset})
+    before = original.read_bytes()
+    p.output.hardlink_to(original)
+    with pytest.raises(MediaError, match="differ"):
+        await engine().render(p)
+    assert original.read_bytes() == before
+    assert p.output.exists() and p.output.samefile(original)

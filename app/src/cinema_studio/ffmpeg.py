@@ -271,6 +271,18 @@ class FfmpegCommandBuilder:
                 f"asettb=1/{profile.audio.sample_rate},asetpts=N/SR/TB[a_normalized]"
             )
             audio_label = "a_normalized"
+        if recipe.gain_db > 0 or (not plan.preview and profile.loudness.mode == "two_pass"):
+            peak = profile.loudness.true_peak_dbtp if profile.loudness.mode == "two_pass" else -1.5
+            # Limit reconstructed peaks after every gain/normalization stage. Leave
+            # encoding headroom for resampling and AAC reconstruction overshoot.
+            limit = 10 ** ((peak - 0.5) / 20)
+            graph.append(
+                f"[{audio_label}]aresample={profile.audio.sample_rate * 4},"
+                f"alimiter=limit={limit:.8f}:level=false:latency=true,"
+                f"aresample={profile.audio.sample_rate},asettb=1/{profile.audio.sample_rate},"
+                "asetpts=N/SR/TB[a_limited]"
+            )
+            audio_label = "a_limited"
         lead = frame_aligned_duration(recipe.lead_in, profile.video.fps)
         tail = frame_aligned_duration(recipe.tail_out, profile.video.fps)
         video_pad: list[str] = []

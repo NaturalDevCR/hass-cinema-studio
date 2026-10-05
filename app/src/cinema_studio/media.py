@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -143,6 +145,9 @@ async def measure_loudness(
 
 async def make_poster(src: Path, dst: Path, at: float) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, filename = tempfile.mkstemp(prefix=f".{dst.stem}-", suffix=".jpg", dir=dst.parent)
+    os.close(descriptor)
+    temporary = Path(filename)
     try:
         await run_process(
             [
@@ -161,14 +166,22 @@ async def make_poster(src: Path, dst: Path, at: float) -> None:
                 "scale=640:-2",
                 "-update",
                 "1",
-                str(dst),
+                str(temporary),
             ]
         )
-        if not dst.is_file():
+        if not temporary.is_file() or temporary.stat().st_size == 0:
             raise MediaError("ffmpeg produced no poster")
-    except BaseException:
-        dst.unlink(missing_ok=True)
-        raise
+        with temporary.open("rb") as handle:
+            if handle.read(3) != b"\xff\xd8\xff":
+                raise MediaError("ffmpeg produced an invalid JPEG poster")
+        from .probe import probe
+
+        info = await probe(temporary)
+        if info.video_codec != "mjpeg":
+            raise MediaError("ffmpeg produced an invalid JPEG poster")
+        temporary.replace(dst)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 async def make_filmstrip(src: Path, dst_dir: Path, *, duration: float) -> dict[str, int | float]:

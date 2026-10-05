@@ -123,3 +123,33 @@ async def test_probe_rejects_malformed_metadata(tmp_path, monkeypatch, payload):
     monkeypatch.setattr(module, "run_process", fake)
     with pytest.raises(MediaError, match="metadata"):
         await probe(tmp_path / "unused.mp4")
+
+
+async def test_poster_out_of_range_does_not_publish_stale_file(make_video, tmp_path):
+    src = make_video(seconds=1)
+    dst = tmp_path / "poster.jpg"
+    await make_poster(src, dst, 0.2)
+    before = dst.read_bytes()
+    with pytest.raises(MediaError):
+        await make_poster(src, dst, 10)
+    assert dst.read_bytes() == before
+    assert sorted(tmp_path.glob("*.jpg")) == [dst]
+
+
+async def test_poster_rejects_non_jpeg_and_preserves_previous(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import cinema_studio.media as media
+
+    dst = tmp_path / "poster.jpg"
+    dst.write_bytes(b"previous poster")
+
+    async def invalid_output(argv):
+        Path(argv[-1]).write_bytes(b"not a jpeg")
+        return b"", b""
+
+    monkeypatch.setattr(media, "run_process", invalid_output)
+    with pytest.raises(MediaError, match="JPEG"):
+        await make_poster(tmp_path / "src.mp4", dst, 0)
+    assert dst.read_bytes() == b"previous poster"
+    assert sorted(tmp_path.glob("*.jpg")) == [dst]

@@ -88,6 +88,16 @@ def _stats(data: dict[str, float | None]) -> LoudnessStats | None:
     return LoudnessStats(*(value for value in values if value is not None))
 
 
+def _same_file(left: Path, right: Path) -> bool:
+    """Recognize identical paths, symlinks and existing hard links."""
+    if left.resolve() == right.resolve():
+        return True
+    try:
+        return left.samefile(right)
+    except FileNotFoundError:
+        return False
+
+
 class RenderEngine:
     def __init__(
         self, builder: FfmpegCommandBuilder, *, timeout_for: Callable[[float], float]
@@ -100,12 +110,14 @@ class RenderEngine:
     ) -> RenderOutput:
         temporary: Path | None = None
         stderr_tail = ""
+        output_is_safe = False
         try:
-            if plan.source.resolve() == plan.output.resolve() or any(
-                asset is not None and asset.resolve() == plan.output.resolve()
-                for asset in (plan.intro, plan.outro)
+            if any(
+                asset is not None and _same_file(asset, plan.output)
+                for asset in (plan.source, plan.intro, plan.outro)
             ):
                 raise MediaError("render output must differ from all inputs")
+            output_is_safe = True
             source = await probe(plan.source)
             intro = await probe(plan.intro) if plan.intro is not None else None
             outro = await probe(plan.outro) if plan.outro is not None else None
@@ -250,14 +262,12 @@ class RenderEngine:
                 on_progress(1.0)
             return output
         except asyncio.CancelledError:
-            plan.output.unlink(missing_ok=True)
+            if output_is_safe:
+                plan.output.unlink(missing_ok=True)
             raise
         except Exception as exc:
             # Never delete an original when an invalid plan aliases its output.
-            if plan.output.resolve() != plan.source.resolve() and all(
-                asset is None or asset.resolve() != plan.output.resolve()
-                for asset in (plan.intro, plan.outro)
-            ):
+            if output_is_safe:
                 plan.output.unlink(missing_ok=True)
             detail = f"{str(exc)[-1000:]}\n{stderr_tail}".strip()
             raise MediaError(detail) from exc
