@@ -1,0 +1,613 @@
+openapi: 3.1.0
+info:
+  title: Cinema Studio integration API
+  version: 0.1.0
+  summary: The v1 API that the cinema_studio integration uses to talk to the Cinema Studio App.
+  description: |
+    Served by the Cinema Studio App on port 8099 and consumed by the `cinema_studio` Home
+    Assistant integration. Every endpoint requires the App's API token as a bearer token and
+    an `X-Cinema-Consumer` header that carries the config entry id of the calling integration.
+
+    All JSON uses snake_case. Timestamps are ISO-8601 UTC strings that end in `Z`. Durations
+    and offsets are seconds. Errors use the `{"detail": "<human message>"}` shape of the
+    `Error` schema.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: http://{host}:{port}
+    description: Cinema Studio App, reached directly on the Home Assistant network.
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8099"
+security:
+  - bearerAuth: []
+tags:
+  - name: integration
+    description: Endpoints used by the cinema_studio integration.
+paths:
+  /api/v1/health:
+    get:
+      tags: [integration]
+      operationId: getHealth
+      summary: Check that the App is up and report its identity.
+      parameters:
+        - $ref: "#/components/parameters/ConsumerHeader"
+      responses:
+        "200":
+          description: The App is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/catalog:
+    get:
+      tags: [integration]
+      operationId: getCatalog
+      summary: Fetch the published catalog.
+      description: |
+        Returns every clip that has a published render. The response carries an `ETag` of the
+        form `"rev-<revision>"`. Send it back in `If-None-Match` to receive `304` when the
+        catalog has not changed.
+      parameters:
+        - $ref: "#/components/parameters/ConsumerHeader"
+        - name: If-None-Match
+          in: header
+          required: false
+          description: The `ETag` of the catalog the caller already holds.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The current catalog.
+          headers:
+            ETag:
+              description: Entity tag of this catalog revision, `"rev-<revision>"`.
+              required: true
+              schema:
+                type: string
+                examples:
+                  - '"rev-42"'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Catalog"
+        "304":
+          description: The catalog has not changed since the revision in `If-None-Match`.
+          headers:
+            ETag:
+              description: Entity tag of the current catalog revision.
+              required: true
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/selections:
+    post:
+      tags: [integration]
+      operationId: postSelections
+      summary: Report which clips the integration selected.
+      description: The App uses these events to update its selection counters.
+      parameters:
+        - $ref: "#/components/parameters/ConsumerHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectionBatch"
+      responses:
+        "204":
+          description: The events were recorded.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: The body is invalid, for example it holds more than 500 events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/v1/import/legacy:
+    post:
+      tags: [integration]
+      operationId: postImportLegacy
+      summary: Import clips from a legacy Worker in two phases.
+      description: |
+        The import takes two calls so the App never needs Worker credentials.
+
+        1. `phase: "stage"` with the Worker manifest. The App stages and verifies the clips and
+           returns a `LegacyStageResponse`.
+        2. `phase: "commit"` with the `run_id` and the clips the integration re-fetched from the
+           Worker. The App reconciles them and publishes, then returns a `LegacyReport`. The
+           call is synchronous and may take minutes.
+
+        A run left in the stage state for more than one hour is discarded and its staged files
+        are deleted.
+      parameters:
+        - $ref: "#/components/parameters/ConsumerHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/LegacyStageRequest"
+                - $ref: "#/components/schemas/LegacyCommitRequest"
+              discriminator:
+                propertyName: phase
+                mapping:
+                  stage: "#/components/schemas/LegacyStageRequest"
+                  commit: "#/components/schemas/LegacyCommitRequest"
+      responses:
+        "200":
+          description: The stage phase returns a `LegacyStageResponse`, the commit phase a `LegacyReport`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/LegacyStageResponse"
+                  - $ref: "#/components/schemas/LegacyReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Another legacy import run is active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: The body is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: The App API token, shown in the Cinema Studio System view.
+  parameters:
+    ConsumerHeader:
+      name: X-Cinema-Consumer
+      in: header
+      required: true
+      description: The config entry id of the calling integration instance.
+      schema:
+        type: string
+  responses:
+    Unauthorized:
+      description: The bearer token is missing or wrong.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Health:
+      type: object
+      required: [status, version, api_version, instance_id]
+      properties:
+        status:
+          type: string
+          const: ok
+        version:
+          type: string
+          description: The App version.
+        api_version:
+          type: integer
+          const: 1
+        instance_id:
+          type: string
+          description: UUID that identifies this App instance, persisted across restarts.
+    Catalog:
+      type: object
+      required: [contract_version, revision, instance_id, generated_at, seasons, collections, clips]
+      properties:
+        contract_version:
+          type: integer
+          const: 1
+        revision:
+          type: integer
+          description: Increments on every change that affects the published catalog.
+        instance_id:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        seasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogSeason"
+        collections:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogCollection"
+        clips:
+          type: array
+          description: Only clips that have a published render.
+          items:
+            $ref: "#/components/schemas/CatalogClip"
+    CatalogSeason:
+      type: object
+      required: [id, name, color, icon, start, end, priority, collection_id]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+        start:
+          type: ["string", "null"]
+          pattern: "^[0-9]{2}-[0-9]{2}$"
+          description: First day of the season as `MM-DD`, inclusive. Null only for `regular`.
+        end:
+          type: ["string", "null"]
+          pattern: "^[0-9]{2}-[0-9]{2}$"
+          description: |
+            Last day of the season as `MM-DD`, inclusive. Earlier than `start` when the season
+            wraps the new year. Null only for `regular`.
+        priority:
+          type: integer
+          description: When seasons overlap, the higher priority wins.
+        collection_id:
+          type: string
+          description: The collection that plays during this season.
+    CatalogCollection:
+      type: object
+      required: [id, name, color, icon, playback_mode, order, enabled]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+        playback_mode:
+          type: string
+          enum: [random, sequential, custom]
+        order:
+          type: array
+          description: Clip ids in custom playback order.
+          items:
+            type: string
+        enabled:
+          type: boolean
+    CatalogClip:
+      type: object
+      required: [id, collection_id, title, source_name, enabled, sort_key, render_pending, render]
+      properties:
+        id:
+          type: string
+        collection_id:
+          type: string
+        title:
+          type: string
+        source_name:
+          type: string
+        enabled:
+          type: boolean
+        sort_key:
+          type: string
+        render_pending:
+          type: boolean
+          description: A newer render is queued; the published one is stale.
+        render:
+          $ref: "#/components/schemas/Render"
+    Render:
+      type: object
+      required:
+        - id
+        - n
+        - relative_path
+        - media_path
+        - size
+        - sha256
+        - duration
+        - content_start
+        - content_end
+        - lead_in
+        - tail_out
+        - content_duration
+        - timing_source
+        - integrated_lufs
+        - true_peak
+        - recipe_hash
+        - profile_fingerprint
+        - published_at
+      properties:
+        id:
+          type: string
+        n:
+          type: integer
+          minimum: 1
+        relative_path:
+          type: string
+          description: '`cinema-studio/renders/<clip_id>/<file>`, relative to `/media`.'
+        media_path:
+          type: string
+          description: Identical to `relative_path`; kept separate for future roots.
+        size:
+          type: integer
+        sha256:
+          type: string
+        duration:
+          type: number
+          description: Total duration in seconds, rounded to 3 decimals.
+        content_start:
+          type: number
+        content_end:
+          type: number
+        lead_in:
+          type: number
+        tail_out:
+          type: number
+        content_duration:
+          type: number
+        timing_source:
+          type: string
+          enum: [measured, legacy_worker, legacy_full_file]
+        integrated_lufs:
+          type: ["number", "null"]
+        true_peak:
+          type: ["number", "null"]
+        recipe_hash:
+          type: string
+        profile_fingerprint:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+    SelectionEvent:
+      type: object
+      required: [selection_id, clip_id, render_id, catalog_revision, selected_at]
+      properties:
+        selection_id:
+          type: string
+        clip_id:
+          type: string
+        render_id:
+          type: string
+        catalog_revision:
+          type: integer
+        selected_at:
+          type: string
+          format: date-time
+    SelectionBatch:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/SelectionEvent"
+    LegacyManifestClip:
+      type: object
+      required:
+        - id
+        - collection_id
+        - state
+        - relative_source_path
+        - relative_output_path
+        - output_duration_seconds
+        - output_available
+        - metadata
+        - updated_at
+      properties:
+        id:
+          type: string
+        collection_id:
+          type: string
+        state:
+          type: string
+        relative_source_path:
+          type: string
+        relative_output_path:
+          type: ["string", "null"]
+        output_duration_seconds:
+          type: ["number", "null"]
+        output_available:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
+        updated_at:
+          type: string
+    LegacyManifest:
+      type: object
+      required: [worker, roots, collections, profiles, assets, seasons, clips]
+      properties:
+        worker:
+          type: object
+          required: [version, queue_depth, active_job_ids]
+          properties:
+            version:
+              type: string
+            queue_depth:
+              type: integer
+            active_job_ids:
+              type: array
+              items:
+                type: string
+        roots:
+          type: object
+          description: Absolute paths as seen in `/media`.
+          required: [source, compiled]
+          properties:
+            source:
+              type: string
+            compiled:
+              type: string
+        collections:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - name
+              - playback_mode
+              - ordered_clip_ids
+              - processing_profile_id
+              - enabled
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              playback_mode:
+                type: string
+              ordered_clip_ids:
+                type: array
+                items:
+                  type: string
+              processing_profile_id:
+                type: string
+              enabled:
+                type: boolean
+        profiles:
+          type: array
+          items:
+            type: object
+            required: [id, name, settings]
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              settings:
+                type: object
+                additionalProperties: true
+        assets:
+          type: array
+          items:
+            type: string
+        seasons:
+          type: array
+          items:
+            type: object
+            required: [id, name, start, end, priority, collection_id]
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              start:
+                type: ["string", "null"]
+              end:
+                type: ["string", "null"]
+              priority:
+                type: integer
+              collection_id:
+                type: string
+        clips:
+          type: array
+          items:
+            $ref: "#/components/schemas/LegacyManifestClip"
+    LegacyStageRequest:
+      type: object
+      required: [phase, manifest]
+      properties:
+        phase:
+          type: string
+          const: stage
+        manifest:
+          $ref: "#/components/schemas/LegacyManifest"
+    LegacyStageResponse:
+      type: object
+      required: [run_id, staged, rejected]
+      properties:
+        run_id:
+          type: string
+        staged:
+          type: array
+          items:
+            type: string
+        rejected:
+          type: array
+          items:
+            type: object
+            required: [clip_id, reason]
+            properties:
+              clip_id:
+                type: string
+              reason:
+                type: string
+    LegacyCommitRequest:
+      type: object
+      required: [phase, run_id, clips]
+      properties:
+        phase:
+          type: string
+          const: commit
+        run_id:
+          type: string
+        clips:
+          type: array
+          description: The clips re-fetched from the Worker after the stage phase.
+          items:
+            $ref: "#/components/schemas/LegacyManifestClip"
+    LegacyReport:
+      type: object
+      required:
+        - run_id
+        - started_at
+        - finished_at
+        - catalog_revision
+        - imported
+        - queued_for_render
+        - needs_source
+        - skipped
+        - missing_assets
+      properties:
+        run_id:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: ["string", "null"]
+          format: date-time
+        catalog_revision:
+          type: integer
+        imported:
+          type: array
+          items:
+            type: string
+        queued_for_render:
+          type: array
+          items:
+            type: string
+        needs_source:
+          type: array
+          items:
+            type: string
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [clip_id, reason]
+            properties:
+              clip_id:
+                type: string
+              reason:
+                type: string
+        missing_assets:
+          type: array
+          items:
+            type: string
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          description: Human-readable message.

@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NaturalDevCR/hass-cinema-studio/contract/selection_response.schema.json",
+  "title": "cinema_studio.select_next_clip response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "instance_id",
+    "catalog_revision",
+    "selection_id",
+    "selected_at",
+    "collection_id",
+    "season",
+    "requested_season",
+    "season_source",
+    "season_fallback",
+    "playback_mode",
+    "history_reset",
+    "activation_reset",
+    "clip_id",
+    "title",
+    "source_name",
+    "render_id",
+    "render_n",
+    "relative_output_path",
+    "media_content_id",
+    "media_content_type",
+    "duration_seconds",
+    "duration",
+    "content_duration",
+    "lead_in_duration",
+    "tail_out_duration",
+    "content_start_offset",
+    "content_end_offset",
+    "timing_source",
+    "timing_verified",
+    "file_verified",
+    "render_pending",
+    "output_is_stale",
+    "size",
+    "sha256",
+    "profile_fingerprint"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 1
+    },
+    "instance_id": {
+      "type": "string"
+    },
+    "catalog_revision": {
+      "type": "integer"
+    },
+    "selection_id": {
+      "type": "string"
+    },
+    "selected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "collection_id": {
+      "type": "string"
+    },
+    "season": {
+      "type": "string"
+    },
+    "requested_season": {
+      "type": "string"
+    },
+    "season_source": {
+      "type": "string",
+      "enum": [
+        "action",
+        "override",
+        "entity",
+        "calendar",
+        "default"
+      ]
+    },
+    "season_fallback": {
+      "type": "boolean"
+    },
+    "playback_mode": {
+      "type": "string",
+      "enum": [
+        "random",
+        "sequential",
+        "custom"
+      ]
+    },
+    "history_reset": {
+      "type": "boolean"
+    },
+    "activation_reset": {
+      "type": "boolean"
+    },
+    "clip_id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "source_name": {
+      "type": "string"
+    },
+    "render_id": {
+      "type": "string"
+    },
+    "render_n": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "relative_output_path": {
+      "type": "string"
+    },
+    "media_content_id": {
+      "type": "string",
+      "pattern": "^media-source://media_source/local/cinema-studio/renders/"
+    },
+    "media_content_type": {
+      "const": "video"
+    },
+    "duration_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 7200
+    },
+    "duration": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 7200
+    },
+    "content_duration": {
+      "type": "number"
+    },
+    "lead_in_duration": {
+      "type": "number"
+    },
+    "tail_out_duration": {
+      "type": "number"
+    },
+    "content_start_offset": {
+      "type": "number"
+    },
+    "content_end_offset": {
+      "type": "number"
+    },
+    "timing_source": {
+      "type": "string",
+      "enum": [
+        "measured",
+        "legacy_worker",
+        "legacy_full_file"
+      ]
+    },
+    "timing_verified": {
+      "const": true
+    },
+    "file_verified": {
+      "const": true
+    },
+    "render_pending": {
+      "type": "boolean"
+    },
+    "output_is_stale": {
+      "type": "boolean"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sha256": {
+      "type": "string"
+    },
+    "profile_fingerprint": {
+      "type": "string"
+    }
+  }
+}

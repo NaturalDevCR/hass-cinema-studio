@@ -1,0 +1,12 @@
+[
+  {"name": "production titanic", "timing": {"duration": 154.133, "content_start": 2.0, "content_end": 152.125, "lead_in": 2.0, "tail_out": 2.008, "content_duration": 150.125}, "valid": true},
+  {"name": "no margins legacy", "timing": {"duration": 30.0, "content_start": 0.0, "content_end": 30.0, "lead_in": 0.0, "tail_out": 0.0, "content_duration": 30.0}, "valid": true},
+  {"name": "start not lead", "timing": {"duration": 30.0, "content_start": 1.0, "content_end": 28.0, "lead_in": 2.0, "tail_out": 2.0, "content_duration": 27.0}, "valid": false},
+  {"name": "end beyond duration", "timing": {"duration": 30.0, "content_start": 2.0, "content_end": 30.5, "lead_in": 2.0, "tail_out": -0.5, "content_duration": 28.5}, "valid": false},
+  {"name": "content duration mismatch", "timing": {"duration": 30.0, "content_start": 2.0, "content_end": 28.0, "lead_in": 2.0, "tail_out": 2.0, "content_duration": 25.0}, "valid": false},
+  {"name": "tail mismatch", "timing": {"duration": 30.0, "content_start": 2.0, "content_end": 28.0, "lead_in": 2.0, "tail_out": 1.5, "content_duration": 26.0}, "valid": false},
+  {"name": "zero duration", "timing": {"duration": 0.0, "content_start": 0.0, "content_end": 0.0, "lead_in": 0.0, "tail_out": 0.0, "content_duration": 0.0}, "valid": false},
+  {"name": "too long", "timing": {"duration": 7200.5, "content_start": 0.0, "content_end": 7200.5, "lead_in": 0.0, "tail_out": 0.0, "content_duration": 7200.5}, "valid": false},
+  {"name": "start equals end", "timing": {"duration": 10.0, "content_start": 5.0, "content_end": 5.0, "lead_in": 5.0, "tail_out": 5.0, "content_duration": 0.0}, "valid": false},
+  {"name": "tolerance edge ok", "timing": {"duration": 10.0, "content_start": 1.0, "content_end": 9.0, "lead_in": 1.0, "tail_out": 1.001, "content_duration": 7.999}, "valid": true}
+]

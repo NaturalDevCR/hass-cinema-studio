@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+node_modules/
+app/ui/dist/
+app/src/cinema_studio/static/
+.DS_Store
+coverage/
+.claude/
+.superpowers/

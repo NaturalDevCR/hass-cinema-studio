@@ -1,0 +1,18 @@
+[
+  {"name": "no special seasons", "seasons": [], "date": "2026-07-01", "expected": "regular"},
+  {"name": "inside simple range", "seasons": [{"id": "halloween", "start": "10-01", "end": "10-31", "priority": 10}], "date": "2026-10-15", "expected": "halloween"},
+  {"name": "range start inclusive", "seasons": [{"id": "halloween", "start": "10-01", "end": "10-31", "priority": 10}], "date": "2026-10-01", "expected": "halloween"},
+  {"name": "range end inclusive", "seasons": [{"id": "halloween", "start": "10-01", "end": "10-31", "priority": 10}], "date": "2026-10-31", "expected": "halloween"},
+  {"name": "outside range", "seasons": [{"id": "halloween", "start": "10-01", "end": "10-31", "priority": 10}], "date": "2026-11-01", "expected": "regular"},
+  {"name": "wrapping range december", "seasons": [{"id": "christmas", "start": "12-01", "end": "01-06", "priority": 20}], "date": "2026-12-24", "expected": "christmas"},
+  {"name": "wrapping range january", "seasons": [{"id": "christmas", "start": "12-01", "end": "01-06", "priority": 20}], "date": "2027-01-06", "expected": "christmas"},
+  {"name": "wrapping range outside", "seasons": [{"id": "christmas", "start": "12-01", "end": "01-06", "priority": 20}], "date": "2027-01-07", "expected": "regular"},
+  {"name": "wrapping range day before start", "seasons": [{"id": "christmas", "start": "12-01", "end": "01-06", "priority": 20}], "date": "2026-11-30", "expected": "regular"},
+  {"name": "overlap higher priority wins", "seasons": [{"id": "halloween", "start": "10-15", "end": "11-30", "priority": 10}, {"id": "christmas", "start": "11-15", "end": "01-06", "priority": 20}], "date": "2026-11-20", "expected": "christmas"},
+  {"name": "overlap equal priority id order", "seasons": [{"id": "b-season", "start": "05-01", "end": "05-31", "priority": 5}, {"id": "a-season", "start": "05-10", "end": "05-20", "priority": 5}], "date": "2026-05-15", "expected": "a-season"},
+  {"name": "leap day inside", "seasons": [{"id": "feb", "start": "02-01", "end": "02-29", "priority": 1}], "date": "2028-02-29", "expected": "feb"},
+  {"name": "single day range", "seasons": [{"id": "new-year-eve", "start": "12-31", "end": "12-31", "priority": 1}], "date": "2026-12-31", "expected": "new-year-eve"},
+  {"name": "regular entry ignored", "seasons": [{"id": "regular", "start": null, "end": null, "priority": 0}], "date": "2026-03-03", "expected": "regular"},
+  {"name": "production halloween single day", "seasons": [{"id": "halloween", "start": "10-31", "end": "10-31", "priority": 10}, {"id": "christmas", "start": "12-01", "end": "01-06", "priority": 20}], "date": "2026-10-31", "expected": "halloween"},
+  {"name": "production day before halloween", "seasons": [{"id": "halloween", "start": "10-31", "end": "10-31", "priority": 10}, {"id": "christmas", "start": "12-01", "end": "01-06", "priority": 20}], "date": "2026-10-30", "expected": "regular"}
+]

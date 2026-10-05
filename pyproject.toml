@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hass-cinema-studio"
+version = "0.1.0"
+description = "Home Assistant Cinema Studio app and integration"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "NaturalDevCR" }]
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["app/src/cinema_studio"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-homeassistant-custom-component>=0.13.300",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    "openapi-spec-validator>=0.7.2",
+    "pyyaml>=6.0",
+    "httpx2>=2.13.1",
+    "jsonschema>=4.26.0",
+]
+studio = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.28",
+    "pydantic>=2.9",
+    "python-multipart>=0.0.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "app/src"]
+asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "studio: tests for the Cinema Studio app",
+  "integration: tests for the Home Assistant integration",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+# docs/ holds design notes with illustrative code blocks; ruff 0.16+ also formats Markdown.
+extend-exclude = [".venv", "build", "dist", "app/ui", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cinema_studio", "custom_components"]
+
+[tool.pyright]
+include = ["app/src/cinema_studio", "custom_components/cinema_studio"]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"
+reportMissingTypeStubs = false
+
+[tool.uv]
+# pytest-homeassistant-custom-component >= 0.13.317 requires Python 3.14, while the App image and
+# CI run Python 3.13. Resolve and lock for 3.13 only (Home Assistant needs >= 3.13.2).
+environments = ["python_full_version >= '3.13.2' and python_full_version < '3.14'"]
