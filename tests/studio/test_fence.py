@@ -308,3 +308,58 @@ def test_unreadable_consumers_halts(paths, monkeypatch):
         result = GarbageCollector(paths, repo, GcFence(paths), store).run()
         assert result.halted_reason and result.deleted == []
         assert path.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("location", ["root", "renders_dir", "consumers_dir", "gc_lock_path"])
+def test_gc_rejects_symlinked_fence_chain(paths, monkeypatch, caplog, location):
+    store = MediaStore(paths)
+    store.ensure_dirs()
+    monkeypatch.setattr(store, "is_network_fs", lambda: False)
+    with closing(Database(paths.database_path)) as db:
+        repo = Repository(db)
+        record = make_render(make_clip(repo))
+        path = paths.media_dir / record.relative_path
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"keep")
+        repo.add_unrecognized_render(
+            render_id=record.id,
+            clip_id=record.clip_id,
+            relative_path=record.relative_path,
+            size=4,
+            mtime_iso=NOW.isoformat(),
+        )
+        timestamp = (NOW - timedelta(hours=49)).timestamp()
+        os.utime(path, (timestamp, timestamp))
+        paths.gc_lock_path.touch()
+        target = getattr(paths, location)
+        outside = paths.media_dir.parent / "outside"
+        target.rename(outside)
+        target.symlink_to(outside, target_is_directory=outside.is_dir())
+        result = GarbageCollector(paths, repo, GcFence(paths), store).run()
+        assert result.deleted == [] and result.halted_reason
+        assert path.read_bytes() == b"keep"
+        assert repo.get_render(record.id).state == "unrecognized"
+        assert "unsafe" in caplog.text.lower()
+
+
+@pytest.mark.parametrize("operation", ["lock", "consumers"])
+def test_fence_operations_reject_root_symlink(paths, monkeypatch, operation):
+    from cinema_studio.errors import InvalidError
+
+    MediaStore(paths).ensure_dirs()
+    outside = paths.media_dir.parent / "outside"
+    paths.root.rename(outside)
+    paths.root.symlink_to(outside, target_is_directory=True)
+    fence = GcFence(paths)
+    if operation == "lock":
+        with pytest.raises(InvalidError), fence.exclusive():
+            pytest.fail("entered fence through symlink")
+        assert not (outside / ".gc.lock").exists()
+    else:
+
+        def unexpected_scan(*args):
+            pytest.fail("read consumers through symlink")
+
+        monkeypatch.setattr(os, "scandir", unexpected_scan)
+        with pytest.raises(InvalidError):
+            fence.read_consumers()

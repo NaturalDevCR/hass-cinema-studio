@@ -90,7 +90,9 @@ class GcFence:
 
     @contextmanager
     def exclusive(self, timeout: float = 30.0) -> Generator[None]:
+        validate_contained_path(self.paths.gc_lock_path, self.paths.media_dir)
         self.paths.root.mkdir(parents=True, exist_ok=True)
+        validate_contained_path(self.paths.gc_lock_path, self.paths.media_dir)
         deadline = time.monotonic() + timeout
         with self.paths.gc_lock_path.open("a") as lock:
             while True:
@@ -110,10 +112,12 @@ class GcFence:
     def read_consumers(self) -> tuple[dict[str, ConsumerFile], list[str]]:
         parsed: dict[str, ConsumerFile] = {}
         failed: list[str] = []
+        validate_contained_path(self.paths.consumers_dir, self.paths.media_dir)
         with os.scandir(self.paths.consumers_dir) as entries:
             files = sorted(Path(entry.path) for entry in entries if entry.name.endswith(".json"))
         for path in files:
             try:
+                validate_contained_path(path, self.paths.media_dir)
                 data: object = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
                     raise ValueError("expected object")
@@ -121,7 +125,7 @@ class GcFence:
                 if consumer.consumer_id != path.stem:
                     raise ValueError("consumer ID does not match filename")
                 parsed[consumer.consumer_id] = consumer
-            except (ValueError, OSError):
+            except (ValueError, InvalidError, OSError):
                 failed.append(path.stem)
         return parsed, failed
 
@@ -150,6 +154,7 @@ class GarbageCollector:
             expected = f"cinema-studio/renders/{record.clip_id}/{path.name}"
             if match is None or match["clip"] != record.clip_id or record.relative_path != expected:
                 raise ValueError("noncanonical render path")
+            validate_contained_path(self.paths.renders_dir, self.paths.media_dir)
             validate_contained_path(path, self.paths.renders_dir)
             if not stat.S_ISREG(path.lstat().st_mode):
                 raise ValueError("render is not a regular file")
@@ -159,12 +164,19 @@ class GarbageCollector:
         return path
 
     def run(self) -> GcResult:
+        try:
+            for path in (self.paths.renders_dir, self.paths.consumers_dir, self.paths.gc_lock_path):
+                validate_contained_path(path, self.paths.media_dir)
+        except InvalidError as error:
+            _LOGGER.warning("Halting GC for unsafe fence path: %s", error)
+            return GcResult([], str(error))
         if self.store.is_network_fs():
             return GcResult([], "network filesystem")
         with self.fence.exclusive():
             try:
                 consumers, failed = self.fence.read_consumers()
-            except OSError as error:
+            except (InvalidError, OSError) as error:
+                _LOGGER.warning("Halting GC: cannot safely read consumers directory: %s", error)
                 return GcResult([], f"cannot read consumers directory: {error}")
             if failed:
                 return GcResult([], "unparseable consumer files: " + ", ".join(failed))
