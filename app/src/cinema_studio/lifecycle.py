@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -18,7 +20,9 @@ from typing import cast
 from fastapi import FastAPI
 
 from .config import Paths
-from .storage import TEST_RENDER_DIR
+from .errors import InvalidError
+from .repository import Repository
+from .storage import TEST_RENDER_DIR, validate_contained_path
 from .supervisor import SupervisorClient, SupervisorError, describe_error
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,6 +33,9 @@ CATALOG_NOTIFY_DELAY = 1.0
 HOUSEKEEPING_INTERVAL = 600.0
 SERVER_WAIT_TIMEOUT = 10.0
 TEST_RENDER_MAX_AGE = 3600.0
+ORIGINAL_RETIRE_MAX_AGE = 3600.0
+_RETIRED_MARKER = ".retired"
+_VERSION_NAME = re.compile(r"v[0-9a-f]{32}")
 
 
 async def wait_for_server(
@@ -71,7 +78,7 @@ async def supervisor_startup(app: FastAPI) -> None:
 
 
 async def housekeeping(app: FastAPI, interval: float) -> None:
-    """Purge abandoned uploads/imports and old test renders; retry failed discovery."""
+    """Purge abandoned uploads/imports and retired media; retry failed discovery."""
     while True:
         await _clean_up(app)
         await asyncio.sleep(interval)
@@ -95,7 +102,76 @@ def purge_test_renders(paths: Paths, max_age: float = TEST_RENDER_MAX_AGE) -> in
     return removed
 
 
+def retire_original(paths: Paths, clip_id: str, filename: str) -> None:
+    """Mark displaced bytes for delayed housekeeping without moving readers' paths."""
+    original = paths.originals_dir / clip_id / filename
+    directory = paths.originals_dir / clip_id
+    try:
+        validate_contained_path(original, paths.originals_dir)
+        marker = (
+            original.parent / _RETIRED_MARKER
+            if original.parent != directory
+            else directory / f"{_RETIRED_MARKER}-{original.name}"
+        )
+        validate_contained_path(marker, paths.originals_dir)
+        marker.touch()
+    except (OSError, InvalidError) as exc:
+        _LOGGER.warning("Could not retire original %s: %s", original, exc)
+
+
+def purge_retired_originals(
+    paths: Paths, repo: Repository, max_age: float = ORIGINAL_RETIRE_MAX_AGE
+) -> int:
+    """Remove marked, unreferenced source versions after a one-hour reader grace period."""
+    root = paths.originals_dir
+    validate_contained_path(root, paths.media_dir)
+    if not root.is_dir():
+        return 0
+    referenced = {
+        root / clip.id / clip.original.filename
+        for clip in repo.list_clips()
+        if clip.original is not None
+    }
+    cutoff = time.time() - max_age
+    removed = 0
+    for directory in root.iterdir():
+        try:
+            validate_contained_path(directory, root)
+            if not directory.is_dir():
+                continue
+            for candidate in directory.iterdir():
+                validate_contained_path(candidate, root)
+                version = _VERSION_NAME.fullmatch(candidate.name) is not None
+                if version and candidate.is_dir():
+                    marker = candidate / _RETIRED_MARKER
+                    in_use = any(path.is_relative_to(candidate) for path in referenced)
+                    target = candidate
+                elif candidate.name.startswith(f"{_RETIRED_MARKER}-"):
+                    marker = candidate
+                    target = directory / candidate.name.removeprefix(f"{_RETIRED_MARKER}-")
+                    validate_contained_path(target, root)
+                    in_use = target in referenced
+                else:
+                    continue
+                validate_contained_path(marker, root)
+                if in_use or not marker.is_file() or marker.stat().st_mtime >= cutoff:
+                    continue
+                if version:
+                    shutil.rmtree(target)
+                else:
+                    target.unlink(missing_ok=True)
+                    marker.unlink()
+                removed += 1
+        except (OSError, InvalidError) as exc:
+            _LOGGER.warning("Could not clean retired originals in %s: %s", directory, exc)
+    return removed
+
+
 async def _clean_up(app: FastAPI) -> None:
+    try:
+        await asyncio.to_thread(purge_retired_originals, app.state.paths, app.state.repo)
+    except Exception:
+        _LOGGER.exception("Retired original cleanup failed")
     try:
         await asyncio.to_thread(purge_test_renders, app.state.paths)
     except Exception:

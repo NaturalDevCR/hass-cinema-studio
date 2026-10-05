@@ -22,6 +22,7 @@ from . import media
 from .config import Paths
 from .errors import InvalidError, NotFoundError
 from .jobs import JobQueue
+from .lifecycle import retire_original
 from .models import (
     BulkSet,
     Clip,
@@ -586,15 +587,7 @@ async def _replace_source_settled(
         except OSError as exc:
             _LOGGER.warning("Could not remove preview for %s: %s", clip.id, exc)
         if clip.original is not None:
-            old = paths.originals_dir / clip.id / clip.original.filename
-            try:
-                validate_contained_path(old, paths.originals_dir)
-                if old.parent != paths.originals_dir / clip.id:
-                    _cleanup_directory(old.parent)
-                else:
-                    old.unlink(missing_ok=True)
-            except (OSError, InvalidError) as exc:
-                _LOGGER.warning("Could not remove old original %s: %s", old, exc)
+            retire_original(paths, clip.id, clip.original.filename)
         return _repo(request).get_clip(clip.id)
     finally:
         if not committed:
@@ -604,6 +597,13 @@ async def _replace_source_settled(
 
 @router.post("/clips/{clip_id}/source")
 async def replace_source(clip_id: str, data: SourceReplace, request: Request) -> Clip:
+    locks: dict[str, asyncio.Lock] = request.app.state.source_locks
+    lock = locks.setdefault(clip_id, asyncio.Lock())
+    async with lock:
+        return await _replace_source(clip_id, data, request)
+
+
+async def _replace_source(clip_id: str, data: SourceReplace, request: Request) -> Clip:
     repo = _repo(request)
     clip = repo.get_clip(clip_id)
     uploads = _uploads(request)

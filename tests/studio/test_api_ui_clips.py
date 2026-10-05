@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -17,7 +18,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from cinema_studio import api_ui_clips, uploads
+from cinema_studio import api_ui_clips, lifecycle, uploads
+from cinema_studio import jobs as jobs_module
 from cinema_studio.app import create_app
 from cinema_studio.auth import INGRESS_PEER
 from cinema_studio.config import Paths
@@ -1023,9 +1025,7 @@ async def test_replacement_placement_keeps_old_readable_and_settles(
         assert current.original is not None
         assert re.fullmatch(r"v[0-9a-f]{32}/replacement.mp4", current.original.filename)
         assert (paths.originals_dir / clip_id / current.original.filename).is_file()
-        assert not original_path.exists()
-        if versioned:
-            assert not original_path.parent.exists()
+        assert original_path.is_file()
         assert current.render_pending and not current.needs_source
         assert {job.kind for job in app.state.jobs.list_jobs()} == {"thumbs", "render"}
     finally:
@@ -1087,3 +1087,221 @@ async def test_source_transaction_failure_rolls_back_placed_version(
     assert original is not None
     assert (paths.originals_dir / clip["id"] / original.filename).is_file()
     assert not any(job.status == "queued" for job in app.state.jobs.list_jobs())
+
+
+async def test_versioned_repair_recovers_after_restart(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    paths: Paths,
+    make_video: Video,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
+    monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
+    clip_id = needs_source_clip(repo)
+    upload_id = await start_upload(idle, make_video(seconds=2))
+    response = await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": upload_id})
+    assert response.status_code == 200
+    filename = response.json()["original"]["filename"]
+    restarted = create_app(paths, start_background=False)
+    try:
+        await restarted.state.jobs.start()
+        await restarted.state.jobs.wait_idle()
+        clip = restarted.state.repo.get_clip(clip_id)
+        assert clip.status == "ready" and clip.render is not None
+        assert clip.original.filename == filename
+        assert (paths.originals_dir / clip_id / filename).is_file()
+    finally:
+        await restarted.state.jobs.stop()
+        restarted.state.db.close()
+
+
+async def test_replacement_preserves_resolved_render_until_housekeeping(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    paths: Paths,
+    make_video: Video,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
+    monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
+    clip_id = needs_source_clip(repo)
+
+    async def replace(name: str) -> None:
+        upload_id = await start_upload(idle, make_video(name=name, seconds=2))
+        assert (
+            await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": upload_id})
+        ).status_code == 200
+
+    await replace("first.mp4")
+    inputs = app.state.jobs._resolve(clip_id)
+    old = inputs.original_path
+    before = old.read_bytes()
+    reached = threading.Event()
+    release = threading.Event()
+    real_link = jobs_module._link
+
+    def paused(source: Path, destination: Path) -> None:
+        reached.set()
+        assert release.wait(10)
+        real_link(source, destination)
+
+    monkeypatch.setattr(jobs_module, "_link", paused)
+    task = asyncio.create_task(
+        app.state.jobs._freeze(app.state.jobs.enqueue_render(clip_id), inputs, preview=False)
+    )
+    try:
+        assert await asyncio.to_thread(reached.wait, 10)
+        await replace("second.mp4")
+        assert old.read_bytes() == before
+        await lifecycle._clean_up(app)
+        assert old.read_bytes() == before
+        release.set()
+        plan, _, _ = await task
+        assert plan.source.read_bytes() == before
+        current = repo.get_clip(clip_id).original
+        assert current is not None
+        current_path = paths.originals_dir / clip_id / current.filename
+        retired_at = (old.parent / ".retired").stat().st_mtime
+        monkeypatch.setattr(lifecycle.time, "time", lambda: retired_at + 3600)
+        await lifecycle._clean_up(app)
+        assert old.is_file()  # strictly older than an hour, not equal to it
+        monkeypatch.setattr(lifecycle.time, "time", lambda: retired_at + 3601)
+        await lifecycle._clean_up(app)
+        assert not old.parent.exists()
+        assert current_path.is_file()
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+async def test_concurrent_source_replacements_serialize(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    paths: Paths,
+    make_video: Video,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
+    monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
+    clip_id = needs_source_clip(repo)
+    first_id = await start_upload(idle, make_video(name="first.mp4", seconds=2))
+    second_id = await start_upload(idle, make_video(name="second.mp4", seconds=2))
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    release = asyncio.Event()
+    real_probe = api_ui_clips._probe_original
+
+    async def paused(staged: Path, maximum: int) -> OriginalInfo:
+        if staged.name == "first.mp4":
+            first_entered.set()
+            await release.wait()
+        else:
+            second_entered.set()
+        return await real_probe(staged, maximum)
+
+    monkeypatch.setattr(api_ui_clips, "_probe_original", paused)
+    first = asyncio.create_task(
+        idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": first_id})
+    )
+    await asyncio.wait_for(first_entered.wait(), 10)
+    second = asyncio.create_task(
+        idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": second_id})
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(second_entered.wait(), 0.1)
+        release.set()
+        first_response, second_response = await asyncio.gather(first, second)
+        assert first_response.status_code == second_response.status_code == 200
+        old = paths.originals_dir / clip_id / first_response.json()["original"]["filename"]
+        assert old.is_file() and (old.parent / ".retired").is_file()
+        current = repo.get_clip(clip_id).original
+        assert current is not None and Path(current.filename).name == "second.mp4"
+    finally:
+        release.set()
+        await asyncio.gather(first, second)
+
+
+async def test_replacement_preserves_thumbnail_source_between_awaits(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    paths: Paths,
+    make_video: Video,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
+    monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
+    clip_id = needs_source_clip(repo)
+
+    async def replace(name: str) -> None:
+        upload_id = await start_upload(idle, make_video(name=name, seconds=2))
+        assert (
+            await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": upload_id})
+        ).status_code == 200
+
+    await replace("first.mp4")
+    old = app.state.jobs._original_path(repo.get_clip(clip_id))
+    before = old.read_bytes()
+    reached = asyncio.Event()
+    release = asyncio.Event()
+    real_poster = jobs_module.media.make_poster
+
+    async def paused(source: Path, target: Path, at: float) -> None:
+        reached.set()
+        await release.wait()
+        assert source.read_bytes() == before
+        await real_poster(source, target, at)
+
+    monkeypatch.setattr(jobs_module.media, "make_poster", paused)
+    task = asyncio.create_task(
+        app.state.jobs._thumbs(app.state.jobs.enqueue_thumbs(clip_id), clip_id)
+    )
+    try:
+        await asyncio.wait_for(reached.wait(), 10)
+        await replace("second.mp4")
+        await lifecycle._clean_up(app)
+        assert old.read_bytes() == before
+        release.set()
+        await task
+        assert (paths.thumbs_dir / clip_id / "original" / "poster.jpg").is_file()
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+async def test_retired_original_cleanup_requires_age_and_no_db_reference(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    paths: Paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clip_id = fake_clip(repo, paths)
+    clip = repo.get_clip(clip_id)
+    assert clip.original is not None
+    old = paths.originals_dir / clip_id / clip.original.filename
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"legacy original")
+    lifecycle.retire_original(paths, clip_id, clip.original.filename)
+    now = time.time()
+    monkeypatch.setattr(lifecycle.time, "time", lambda: now + 3601)
+    assert lifecycle.purge_retired_originals(paths, repo) == 0
+    assert old.is_file()  # an aged marker never overrides the database reference
+    version = "v" + "a" * 32
+    new = old.parent / version / "new.mp4"
+    new.parent.mkdir()
+    new.write_bytes(b"current original")
+    repo.set_original(clip_id, clip.original.model_copy(update={"filename": f"{version}/new.mp4"}))
+    assert lifecycle.purge_retired_originals(paths, repo) == 1
+    assert not old.exists() and new.is_file()
+    lifecycle.retire_original(paths, clip_id, f"{version}/new.mp4")
+    monkeypatch.setattr(lifecycle.time, "time", lambda: now + 7202)
+    assert lifecycle.purge_retired_originals(paths, repo) == 0
+    assert new.is_file()

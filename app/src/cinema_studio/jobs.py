@@ -192,8 +192,11 @@ class JobQueue:
                 self._repo.set_flags(clip.id, has_preview=False)
             if clip.status != "processing" or clip.needs_source or clip.id in queued:
                 continue
-            directory = self._paths.originals_dir / clip.id
-            if directory.is_dir() and any(path.is_file() for path in directory.iterdir()):
+            try:
+                present = self._original_path(clip).is_file()
+            except (StudioError, OSError, media.MediaError):
+                present = False
+            if present:
                 self.enqueue_probe(clip.id)
             else:
                 self._repo.set_status(clip.id, "failed", "interrupted")
@@ -496,7 +499,7 @@ class JobQueue:
         if info.duration > maximum:
             raise InvalidError(f"Video is longer than {maximum} s")
         original = OriginalInfo(
-            filename=source.name,
+            filename=source.relative_to(self._paths.originals_dir / clip_id).as_posix(),
             size=source.stat().st_size,
             sha256=await media.file_sha256(source),
             duration=info.duration,

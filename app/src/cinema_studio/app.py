@@ -86,6 +86,7 @@ def create_app(
         engine = RenderEngine(FfmpegCommandBuilder(), timeout_for=render_timeout)
         state = app.state
         state.discovery_lock = asyncio.Lock()
+        state.source_locks = {}
         state.paths = paths
         state.db = db
         state.repo = repo
