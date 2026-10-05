@@ -1045,3 +1045,24 @@ def test_set_original_if_stale_path_changes_nothing(repo: Repository, revisions:
     assert repo.set_original_if(clip_id, original(), expected_relative_path="movie.mp4") is False
     assert repo.get_clip(clip_id) == before
     assert repo.catalog_revision() == revision and revisions == callbacks
+
+
+@pytest.mark.parametrize("displaced", [False, True])
+def test_probe_failure_settlement_is_conditional(repo: Repository, displaced: bool):
+    clip_id = make_clip(repo)
+    if displaced:
+        repo.replace_original(
+            clip_id, original(30).model_copy(update={"filename": "v" + "c" * 32 + "/new.mp4"})
+        )
+    before = repo.get_clip(clip_id)
+    revision = repo.catalog_revision()
+    assert repo.set_probe_failure_if(
+        clip_id, "probe failed", expected_relative_path="movie.mp4"
+    ) is (not displaced)
+    after = repo.get_clip(clip_id)
+    if displaced:
+        assert after == before
+    else:
+        assert after.status == "failed" and after.error == "probe failed"
+        assert after.original == before.original
+    assert repo.catalog_revision() == revision

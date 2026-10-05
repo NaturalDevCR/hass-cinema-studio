@@ -1019,6 +1019,27 @@ class Repository:
             tx.bump = True
             return _get_clip(tx.conn, clip_id)
 
+    def set_probe_failure_if(
+        self,
+        clip_id: str,
+        error: str,
+        *,
+        expected_relative_path: str | None,
+        cancelled: bool = False,
+    ) -> bool:
+        """Settle a failed probe only while the source it read is still current."""
+        with self._write() as tx:
+            clip = _get_clip(tx.conn, clip_id)
+            current_path = clip.original.filename if clip.original is not None else None
+            if current_path != expected_relative_path:
+                return False
+            status = "ready" if cancelled and clip.render is not None else "failed"
+            tx.conn.execute(
+                "UPDATE clips SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                (status, None if status == "ready" else error, utcnow_iso(), clip_id),
+            )
+            return True
+
     def set_status(self, clip_id: str, status: ClipStatus, error: str | None = None) -> Clip:
         with self._write() as tx:
             _get_row(tx.conn, "clips", "Clip", clip_id)

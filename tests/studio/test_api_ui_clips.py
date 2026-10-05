@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
 import hashlib
 import re
 import shutil
@@ -1311,6 +1313,8 @@ async def test_retired_original_cleanup_requires_age_and_no_db_reference(
     assert new.is_file()
 
 
+@pytest.mark.parametrize("outcome", ["success", "exception", "excessive_duration"])
+@pytest.mark.parametrize("versioned", [False, True])
 async def test_stale_probe_cannot_overwrite_committed_replacement(
     idle: Client,
     app: FastAPI,
@@ -1318,47 +1322,90 @@ async def test_stale_probe_cannot_overwrite_committed_replacement(
     make_video: Video,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    outcome: str,
+    versioned: bool,
+    paths: Paths,
 ):
     monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
     monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
-    clip_id = needs_source_clip(repo)
-
-    async def replace(name: str, width: int) -> None:
-        upload_id = await start_upload(idle, make_video(name=name, seconds=2, width=width))
-        response = await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": upload_id})
-        assert response.status_code == 200
-
-    await replace("old.mp4", 320)
+    # Initial upload has no OriginalInfo: its captured DB path is null.
+    response = await upload_clip(idle, make_video(name="old.mp4", seconds=2))
+    assert response.status_code == 200
+    clip_id = response.json()["id"]
+    assert repo.get_clip(clip_id).original is None
+    if versioned:
+        source = paths.originals_dir / clip_id / "old.mp4"
+        original = await api_ui_clips._probe_original(source, repo.get_settings().max_duration_s)
+        placed = app.state.store.store_original(
+            source, clip_id, "old.mp4", link=False, version="v" + "a" * 32
+        )
+        repo.set_original(
+            clip_id,
+            original.model_copy(
+                update={"filename": placed.relative_to(paths.originals_dir / clip_id).as_posix()}
+            ),
+        )
+    probe_job = app.state.jobs.list_jobs()[0]
     entered = asyncio.Event()
     release = asyncio.Event()
+    followup_entered = asyncio.Event()
+    followup_release = asyncio.Event()
     real_probe = jobs_module.probe
+    real_execute = app.state.jobs._execute
 
     async def paused(source: Path):
         entered.set()
         await release.wait()
-        return await real_probe(source)
+        if outcome == "exception":
+            raise jobs_module.media.MediaError("displaced probe failed")
+        result = await real_probe(source)
+        if outcome == "excessive_duration":
+            return dataclasses.replace(result, duration=repo.get_settings().max_duration_s + 1)
+        return result
+
+    async def gate(entry):
+        if entry.job.kind != "probe":
+            followup_entered.set()
+            await followup_release.wait()
+        await real_execute(entry)
 
     monkeypatch.setattr(jobs_module, "probe", paused)
-    entry = jobs_module._Entry(app.state.jobs.enqueue_probe(clip_id))
-    task = asyncio.create_task(app.state.jobs._probe(entry, clip_id))
+    monkeypatch.setattr(app.state.jobs, "_execute", gate)
+    task = asyncio.create_task(app.state.jobs._work())
     try:
         await asyncio.wait_for(entered.wait(), 10)
-        await replace("new.mp4", 192)
+        upload_id = await start_upload(idle, make_video(name="new.mp4", seconds=2, width=192))
+        response = await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": upload_id})
+        assert response.status_code == 200
         committed = repo.get_clip(clip_id)
         assert committed.original is not None and committed.original.width == 192
 
         def forbidden(*args: object, **kwargs: object) -> None:
             pytest.fail("stale probe must not enqueue jobs")
 
+        real_enqueue_render = app.state.jobs.enqueue_render
+        real_enqueue_thumbs = app.state.jobs.enqueue_thumbs
         monkeypatch.setattr(app.state.jobs, "enqueue_render", forbidden)
         monkeypatch.setattr(app.state.jobs, "enqueue_thumbs", forbidden)
         release.set()
-        await task
+        # _work has settled/finished the probe and paused before the replacement's next job.
+        await asyncio.wait_for(followup_entered.wait(), 10)
         assert repo.get_clip(clip_id) == committed
+        assert probe_job.status == "done" and probe_job.error is None
+        assert probe_job.finished_at is not None
         assert "Skipping stale probe" in caplog.text
+        if outcome != "success":
+            assert "superseded" in caplog.text
+        monkeypatch.setattr(app.state.jobs, "enqueue_render", real_enqueue_render)
+        monkeypatch.setattr(app.state.jobs, "enqueue_thumbs", real_enqueue_thumbs)
+        followup_release.set()
+        await app.state.jobs.wait_idle()
+        assert repo.get_clip(clip_id).status == "ready"
     finally:
         release.set()
-        if not task.done():
+        followup_release.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
             await task
 
 
@@ -1373,3 +1420,34 @@ async def test_source_locks_reclaimed_after_not_found(
     response = await idle.post(f"/api/ui/clips/{clip_id}/source", json={"upload_id": "unknown"})
     assert response.status_code == 404
     assert not app.state.source_locks
+
+
+async def test_current_initial_probe_failure_still_settles_clip(
+    idle: Client,
+    app: FastAPI,
+    repo: Repository,
+    make_video: Video,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(uploads, "CHUNK_SIZE", CHUNK)
+    monkeypatch.setattr(api_ui_clips, "CHUNK_SIZE", CHUNK)
+    response = await upload_clip(idle, make_video(seconds=2))
+    assert response.status_code == 200
+    clip_id = response.json()["id"]
+    job = app.state.jobs.list_jobs()[0]
+
+    async def failed_probe(source: Path):
+        raise jobs_module.media.MediaError("current source failed")
+
+    monkeypatch.setattr(jobs_module, "probe", failed_probe)
+    task = asyncio.create_task(app.state.jobs._work())
+    try:
+        await app.state.jobs.wait_idle()
+        clip = repo.get_clip(clip_id)
+        assert clip.status == "failed" and clip.error == "current source failed"
+        assert job.status == "failed" and job.error == clip.error
+        assert job.finished_at is not None
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

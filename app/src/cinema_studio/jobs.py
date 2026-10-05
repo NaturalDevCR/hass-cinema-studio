@@ -113,6 +113,7 @@ class _Entry:
     recipe: Recipe | None = None
     # Whether the job moved the clip into processing/rendering (so a failure must settle it).
     touched: bool = False
+    expected_original_path: str | None = None  # captured by a started probe
 
 
 @dataclass(frozen=True)
@@ -312,22 +313,40 @@ class JobQueue:
         job.finished_at = utcnow_iso()
         self._finished.appendleft(job)
 
-    def _fail(self, entry: _Entry, error: str, *, cancelled: bool = False) -> None:
+    def _fail(self, entry: _Entry, error: str, *, cancelled: bool = False) -> bool:
+        """Settle failure; return True when a displaced probe was superseded instead."""
         job = entry.job
         job.status = "failed"
         job.error = error[-_ERROR_LENGTH:]
         if not entry.touched or job.clip_id is None:
-            return
+            return False
         try:
-            clip = self._repo.get_clip(job.clip_id)
-            if cancelled and clip.render is not None:
-                self._repo.set_status(clip.id, "ready")
+            if job.kind == "probe":
+                if not self._repo.set_probe_failure_if(
+                    job.clip_id,
+                    job.error,
+                    expected_relative_path=entry.expected_original_path,
+                    cancelled=cancelled,
+                ):
+                    job.status = "done"
+                    job.error = None
+                    job.progress = 1.0
+                    _LOGGER.info(
+                        "Skipping stale probe failure for %s: superseded by source replacement",
+                        job.clip_id,
+                    )
+                    return True
             else:
-                self._repo.set_status(clip.id, "failed", job.error)
+                clip = self._repo.get_clip(job.clip_id)
+                if cancelled and clip.render is not None:
+                    self._repo.set_status(clip.id, "ready")
+                else:
+                    self._repo.set_status(clip.id, "failed", job.error)
         except StudioError as exc:
             _LOGGER.warning("Could not settle clip status for job %s: %s", job.id, exc)
         except Exception:
             _LOGGER.exception("Could not settle clip status for job %s", job.id)
+        return False
 
     async def _work(self) -> None:
         while True:
@@ -344,11 +363,11 @@ class JobQueue:
                     raise
                 except Exception as exc:
                     error = str(exc) or type(exc).__name__
-                    if isinstance(exc, (media.MediaError, StudioError)):
-                        _LOGGER.warning("Job %s failed: %s", job.id, error)
-                    else:
-                        _LOGGER.exception("Job %s failed: %s", job.id, error)
-                    self._fail(entry, error)
+                    if not self._fail(entry, error):
+                        if isinstance(exc, (media.MediaError, StudioError)):
+                            _LOGGER.warning("Job %s failed: %s", job.id, error)
+                        else:
+                            _LOGGER.exception("Job %s failed: %s", job.id, error)
                 else:
                     job.status = "done"
                     job.progress = 1.0
@@ -489,10 +508,10 @@ class JobQueue:
     # --- probe ------------------------------------------------------------------------------
 
     async def _probe(self, entry: _Entry, clip_id: str) -> None:
-        entry.touched = True
         clip = self._repo.set_status(clip_id, "processing")
+        entry.expected_original_path = clip.original.filename if clip.original is not None else None
+        entry.touched = True
         source = self._original_path(clip)
-        expected_relative_path = clip.original.filename if clip.original is not None else None
         if not source.is_file():
             raise media.MediaError("The original video file is missing")
         info = await probe(source)
@@ -512,10 +531,12 @@ class JobQueue:
         )
         clip.recipe.validate_for(original)
         if not self._repo.set_original_if(
-            clip_id, original, expected_relative_path=expected_relative_path
+            clip_id, original, expected_relative_path=entry.expected_original_path
         ):
             _LOGGER.info("Skipping stale probe for %s: original source was replaced", clip_id)
             return
+        # Initial probe publication changes a null DB path to this same source's filename.
+        entry.expected_original_path = original.filename
         self.enqueue_render(clip_id)
         self.enqueue_thumbs(clip_id)
 
