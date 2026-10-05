@@ -84,7 +84,7 @@ async def _clean_up(app: FastAPI) -> None:
     legacy = getattr(app.state, "legacy", None)
     if legacy is not None:
         try:
-            await asyncio.to_thread(legacy.discard_stale)
+            await legacy.cleanup_stale()
         except Exception:
             _LOGGER.exception("Legacy import cleanup failed")
 

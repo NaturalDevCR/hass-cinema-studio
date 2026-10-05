@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
+import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,6 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from cinema_studio import lifecycle
 from cinema_studio.app import create_app
 from cinema_studio.config import Paths
 from cinema_studio.errors import ConflictError, InvalidError
@@ -642,7 +645,11 @@ async def test_started_at_captured_before_verification(
 
 
 async def test_clip_failure_isolated_and_sanitized(
-    client: TestClient, paths: Paths, manifest: LegacyManifest, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    paths: Paths,
+    manifest: LegacyManifest,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     manifest.clips.append(manifest.clips[0].model_copy(update={"id": OTHER_ID}))
     repo = client.app.state.repo
@@ -665,6 +672,12 @@ async def test_clip_failure_isolated_and_sanitized(
     assert not (paths.work_dir / "import" / stage.run_id).exists()
     assert not list((paths.originals_dir / CLIP_ID).glob("*.mp4"))
     assert not list((paths.renders_dir / CLIP_ID).glob("*.mp4"))
+    diagnostics = [r for r in caplog.records if r.name == "cinema_studio.legacy"]
+    assert len(diagnostics) == 1
+    record = diagnostics[0]
+    assert record.exc_info is not None and record.exc_info[0] is InvalidError
+    assert "password=private" in str(record.exc_info[1])
+    assert CLIP_ID in record.getMessage() and stage.run_id in record.getMessage()
 
 
 @pytest.mark.parametrize("failures", [1, 2])
@@ -732,3 +745,96 @@ async def test_corrupt_stage_timestamp_returns_422(
     assert response.status_code == 422
     assert response.json()["detail"] == "corrupt import stage"
     assert not run.exists()
+
+
+async def test_housekeeping_waits_for_active_stage(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    legacy = importer(client, paths)
+    client.app.state.legacy = legacy
+    paused = asyncio.Event()
+    release = asyncio.Event()
+    original = legacy._link_verified
+    stage_file: Path | None = None
+
+    async def pause_verification(source: Path, target: Path, expected: object):
+        nonlocal stage_file
+        if not paused.is_set():
+            stage_file = target.parents[2] / "stage.json"
+            stage_file.write_text('{"started_at":')
+            paused.set()
+            await release.wait()
+        return await original(source, target, expected)
+
+    # Inline executor dispatch so the old unlocked cleanup finishes deterministically,
+    # without depending on a worker thread's scheduling or an elapsed-time assertion.
+    async def inline_thread(func: Callable[..., object], *args: object, **kwargs: object):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_link_verified", pause_verification)
+    monkeypatch.setattr(asyncio, "to_thread", inline_thread)
+    stage_task = asyncio.create_task(legacy.stage(manifest))
+    cleanup_task = None
+    try:
+        await asyncio.wait_for(paused.wait(), 2)
+        cleanup_task = asyncio.create_task(lifecycle._clean_up(client.app))
+        await asyncio.sleep(0)  # Let cleanup reach the importer's lock.
+        assert not cleanup_task.done(), "cleanup must wait for active staging"
+        assert stage_file is not None and stage_file.read_text() == '{"started_at":'
+        release.set()
+        staged = await asyncio.wait_for(stage_task, 2)
+        await asyncio.wait_for(cleanup_task, 2)
+        assert stage_file.is_file()
+        saved = json.loads(stage_file.read_text())
+        assert saved["verdicts"][0]["clip_id"] == CLIP_ID
+        report = await legacy.commit(staged.run_id, manifest.clips)
+        assert report.imported == [CLIP_ID]
+    finally:
+        release.set()
+        await asyncio.gather(
+            stage_task,
+            *([cleanup_task] if cleanup_task is not None else []),
+            return_exceptions=True,
+        )
+
+
+async def test_cancelled_cleanup_keeps_lock_until_worker_finishes(
+    client: TestClient, paths: Paths, manifest: LegacyManifest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    legacy = importer(client, paths)
+    client.app.state.legacy = legacy
+    staged = await legacy.stage(manifest)
+    run = paths.work_dir / "import" / staged.run_id
+    legacy.now = lambda: NOW + timedelta(hours=2)
+    loop = asyncio.get_running_loop()
+    worker_started = asyncio.Event()
+    release_worker = threading.Event()
+    rmtree = shutil.rmtree
+
+    def slow_delete(path: Path):
+        if path == run:
+            loop.call_soon_threadsafe(worker_started.set)
+            if not release_worker.wait(5):
+                raise AssertionError("cleanup worker was not released")
+        rmtree(path)
+
+    monkeypatch.setattr(shutil, "rmtree", slow_delete)
+    cleanup_task = asyncio.create_task(lifecycle._clean_up(client.app))
+    try:
+        await asyncio.wait_for(worker_started.wait(), 2)
+        cleanup_task.cancel()
+        await asyncio.sleep(0)
+        assert legacy._lock.locked(), "cancellation must not release an active cleanup worker"
+        cleanup_task.cancel()  # Repeated cancellation must also keep the worker fenced.
+        await asyncio.sleep(0)
+        assert legacy._lock.locked()
+        with pytest.raises(ConflictError):
+            await legacy.stage(manifest)
+        release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup_task
+        assert not run.exists() and not legacy._lock.locked()
+        assert (await legacy.stage(manifest)).staged == [CLIP_ID]
+    finally:
+        release_worker.set()
+        await asyncio.gather(cleanup_task, return_exceptions=True)

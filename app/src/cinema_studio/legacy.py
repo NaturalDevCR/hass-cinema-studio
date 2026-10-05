@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import re
@@ -42,6 +43,8 @@ from .repository import Repository
 from .storage import MediaStore, validate_contained_path
 from .timing import Timing
 from .timing_validation import validate_timing
+
+_LOGGER = logging.getLogger(__name__)
 
 _TIMING_KEYS = (
     "content_duration_seconds",
@@ -226,7 +229,29 @@ class LegacyImporter:
         return path
 
     def discard_stale(self) -> None:
-        if self._lock.locked() or not self._root.exists():
+        """Clean up synchronously on the event loop; background callers use cleanup_stale."""
+        if not self._lock.locked():
+            self._discard_stale()
+
+    async def cleanup_stale(self) -> None:
+        """Wait for stage/commit, then fence the filesystem worker until it finishes."""
+        async with self._lock:
+            worker = asyncio.create_task(asyncio.to_thread(self._discard_stale))
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Cancelling a to_thread await does not stop its worker. Keep the lock held,
+                # including on repeated cancellation, until no filesystem work remains.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                worker.result()
+                raise
+
+    def _discard_stale(self) -> None:
+        if not self._root.exists():
             return
         validate_contained_path(self._root, self.paths.media_dir)
         cutoff = self.now().astimezone(UTC) - timedelta(hours=1)
@@ -270,8 +295,8 @@ class LegacyImporter:
         if self._lock.locked():
             raise ConflictError("Another legacy import is active")
         started_at = self.now()
-        self.discard_stale()
         async with self._lock:
+            self._discard_stale()
             if self._root.exists() and any(self._root.iterdir()):
                 raise ConflictError("Another legacy import is active")
             local = started_at.astimezone()
@@ -413,8 +438,8 @@ class LegacyImporter:
     async def commit(self, run_id: str, clips: list[LegacyClip]) -> LegacyReport:
         if self._lock.locked():
             raise ConflictError("Another legacy import is active")
-        self.discard_stale()
         async with self._lock:
+            self._discard_stale()
             run = self._run_path(run_id)
             try:
                 stage = _Stage.model_validate_json((run / "stage.json").read_text())
@@ -464,6 +489,9 @@ class LegacyImporter:
                             continue
                         await self._import_clip(run, clip, verdict, report)
                     except Exception as exc:
+                        _LOGGER.exception(
+                            "Legacy import %s failed for clip %s", run_id, verdict.clip_id
+                        )
                         # Expose only the class: tool errors may contain private paths or secrets.
                         report.skipped.append(
                             LegacySkip(
