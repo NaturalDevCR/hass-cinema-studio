@@ -1,0 +1,3 @@
+#!/usr/bin/with-contenv bashio
+# with-contenv exposes the container environment (SUPERVISOR_TOKEN) under s6-overlay.
+exec python3 -m cinema_studio.main
