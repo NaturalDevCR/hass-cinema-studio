@@ -131,7 +131,7 @@ def parse_catalog(data: Mapping[str, Any]) -> Catalog:
         clip_id = _get(raw, "id", str, "clip")
         try:
             clips.append(_parse_clip(raw))
-        except ValueError:
+        except (ValueError, OverflowError):
             invalid.append(clip_id)
     return Catalog(
         version,
@@ -198,8 +198,14 @@ def _parse_clip(data: Mapping[str, Any]) -> ClipDef:
         raise ValueError("render timing must be finite")
     timing = Timing(*map(float, vals))
     path = _get(r, "relative_path", str, "render")
-    if ".." in path.split("/") or not path.startswith(f"cinema-studio/renders/{clip_id}/"):
+    if (
+        "\\" in path
+        or ".." in path.split("/")
+        or not path.startswith(f"cinema-studio/renders/{clip_id}/")
+    ):
         raise ValueError("render path is unsafe or outside clip directory")
+    if r.get("media_path") != path:
+        raise ValueError("render media_path must match relative_path")
     if timing_problems(timing):
         raise ValueError("render timing is invalid")
     lufs = r.get("integrated_lufs")

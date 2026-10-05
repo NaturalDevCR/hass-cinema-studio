@@ -15,7 +15,10 @@ def evaluate_activation(
     new = ActivationState(season_id, collection_id)
     if state.last_effective_season is None:
         return new, None
-    changed = (
-        state.last_effective_season != season_id or state.last_effective_collection != collection_id
-    )
-    return (new, collection_id if changed and not fallback else None)
+    if state.last_effective_season == season_id:
+        if state.last_effective_collection != collection_id and not fallback:
+            return new, collection_id
+        if fallback:
+            return state, None
+        return new, None
+    return new, None if fallback else collection_id

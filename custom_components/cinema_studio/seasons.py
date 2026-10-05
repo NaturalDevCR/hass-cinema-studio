@@ -55,11 +55,9 @@ def resolve_effective_season(
             raise UnknownSeasonError(action_season)
         return season.id, "action"
     for value, source in ((override, "override"), (entity_state, "entity")):
-        if (
-            value is None
-            or source == "entity"
-            and value.casefold() in {"", "unknown", "unavailable"}
-        ):
+        if value is None:
+            continue
+        if source == "entity" and value.casefold() in {"", "unknown", "unavailable"}:
             continue
         season = catalog.find_season(value)
         if season is not None:

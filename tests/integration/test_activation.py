@@ -13,6 +13,7 @@ pytestmark = pytest.mark.integration
         (ActivationState("s", "old"), "t", "c", True, None),
         (ActivationState("s", "old"), "s", "c", False, "c"),
         (ActivationState("s", "c"), "s", "c", False, None),
+        (ActivationState("s", "old"), "s", "new", True, None),
     ],
 )
 def test_activation_rules(old, season, collection, fallback, reset) -> None:
@@ -20,4 +21,9 @@ def test_activation_rules(old, season, collection, fallback, reset) -> None:
         old, season_id=season, collection_id=collection, fallback=fallback
     )
     assert actual_reset == reset
-    assert state == ActivationState(season, collection)
+    expected_state = (
+        old
+        if old.last_effective_season == season and fallback
+        else ActivationState(season, collection)
+    )
+    assert state == expected_state

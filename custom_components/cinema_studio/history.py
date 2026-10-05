@@ -17,11 +17,38 @@ class HistoryState:
         )
         collections: dict[str, dict[str, Any]] = {}
         for key, value in raw.items():
-            if isinstance(key, str) and isinstance(value, Mapping):
-                record = cast(Mapping[object, Any], value)
-                collections[key] = {
-                    field: item for field, item in record.items() if isinstance(field, str)
-                }
+            if not isinstance(key, str) or not key or not isinstance(value, Mapping):
+                continue
+            record = cast(Mapping[str, Any], value)
+            period, round_number, played = (
+                record.get("period_start"),
+                record.get("round_number"),
+                record.get("played_clip_ids"),
+            )
+            last_selected, last_reset = (
+                record.get("last_selected_clip_id"),
+                record.get("last_reset_at"),
+            )
+            if (
+                not isinstance(period, str)
+                or isinstance(round_number, bool)
+                or not isinstance(round_number, int)
+                or round_number < 1
+                or not isinstance(played, list)
+                or not all(isinstance(item, str) and item for item in cast(list[object], played))
+                or (last_selected is not None and not isinstance(last_selected, str))
+                or (last_reset is not None and not isinstance(last_reset, str))
+            ):
+                continue
+            played_ids = cast(list[str], played)
+            collections[key] = {
+                "period_start": period,
+                "round_number": round_number,
+                "played_clip_ids": list(dict.fromkeys(played_ids)),
+                "last_selected_clip_id": last_selected,
+                "last_reset_at": last_reset,
+                "reset_pending": bool(record.get("reset_pending", False)),
+            }
         self._data: dict[str, Any] = {"collections": collections}
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,7 +100,9 @@ class HistoryState:
             "round_number": round_number,
             "played_clip_ids": [*played, clip_id],
             "last_selected_clip_id": clip_id,
-            "last_reset_at": record.get("last_reset_at") if record else None,
+            "last_reset_at": now.isoformat()
+            if reset and record
+            else (record.get("last_reset_at") if record else None),
             "reset_pending": False,
         }
         return clip_id, round_number, reset, new
@@ -84,7 +113,9 @@ class HistoryState:
             "played_clip_ids": list(record["played_clip_ids"]),
         }
 
-    def reset(self, collection_id: str | None, now: datetime) -> list[str]:
+    def reset(
+        self, collection_id: str | None, now: datetime, *, reset_time: time = time(0, 0)
+    ) -> list[str]:
         ids = (
             sorted(self._data["collections"])
             if collection_id is None
@@ -93,7 +124,7 @@ class HistoryState:
         for key in ids:
             rec = self._data["collections"][key]
             self._data["collections"][key] = {
-                "period_start": now.date().isoformat(),
+                "period_start": _period_start(now, reset_time),
                 "round_number": int(rec.get("round_number", 1)) + 1,
                 "played_clip_ids": [],
                 "last_selected_clip_id": None,

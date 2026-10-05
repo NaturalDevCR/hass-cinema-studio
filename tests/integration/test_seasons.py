@@ -4,13 +4,13 @@ import pytest
 
 from custom_components.cinema_studio.catalog import parse_catalog
 from custom_components.cinema_studio.seasons import UnknownSeasonError, resolve_effective_season
-from tests.integration.test_catalog import payload
 
 pytestmark = pytest.mark.integration
 
 
-def test_effective_season_precedence_and_entity_name() -> None:
-    data = payload()
+def test_effective_season_precedence_and_entity_name(catalog_payload: dict) -> None:
+    data = catalog_payload.copy()
+    data["seasons"] = list(data["seasons"])
     data["seasons"].append(
         {
             "id": "halloween",
