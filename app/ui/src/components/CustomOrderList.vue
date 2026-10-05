@@ -1,8 +1,15 @@
 <script setup lang="ts">
-import { ref, watch } from "vue"; import type { Clip } from "@/api/types"; import { ui } from "@/api/client"; import { useI18n } from "@/i18n";
-const props = defineProps<{ collectionId: string; clips: Clip[] }>(); const emit = defineEmits<{ "update:order": [ids: string[]] }>(); const ids = ref(props.clips.map(c => c.id)); const { t } = useI18n();
+import { ref, watch } from "vue"; import type { Clip } from "@/api/types"; import { ui, messageOf } from "@/api/client"; import { useToast } from "@/composables/useToast"; import { useI18n } from "@/i18n";
+const props = defineProps<{ collectionId: string; clips: Clip[] }>(); const emit = defineEmits<{ "update:order": [ids: string[]] }>(); const ids = ref(props.clips.map(c => c.id)); const { t } = useI18n(); const toast = useToast(); let saving = false;
 watch(() => props.clips, clips => { ids.value = clips.map(c => c.id); }, { deep: true });
-async function persist(next: string[]) { ids.value = next; emit('update:order', next); await ui.collections.order(props.collectionId, next); }
+// The new order is only shown once the integration accepted it; a failure leaves the list as it was.
+async function persist(next: string[]) {
+  if (saving) return;
+  saving = true;
+  try { await ui.collections.order(props.collectionId, next); ids.value = next; emit('update:order', next); }
+  catch (cause) { toast.push(messageOf(cause), "error"); }
+  finally { saving = false; }
+}
 async function move(index: number, delta: number) { const target = index + delta; if (target < 0 || target >= ids.value.length) return; const next = [...ids.value]; [next[index], next[target]] = [next[target]!, next[index]!]; await persist(next); }
 function drop(index: number, event: DragEvent) { const from = Number(event.dataTransfer?.getData('text/plain')); if (!Number.isInteger(from) || from === index) return; const next = [...ids.value]; const [moved] = next.splice(from, 1); next.splice(index, 0, moved!); void persist(next); }
 </script>

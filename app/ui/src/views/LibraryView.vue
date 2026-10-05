@@ -23,8 +23,8 @@ const { clips, collections, seasons, normProfiles, loaded, refreshClips, seasonB
 const { confirm } = useConfirm(); const toast = useToast(); const player = usePlayer();
 const selectedCollection = ref<string | null>(null); const query = ref(""); const seasonId = ref<string | null>(null); const status = ref<ClipStatus | null>(null);
 const selected = ref<string[]>([]); const busy = ref(false); const sheet = ref<"move" | "normalize" | "level" | null>(null); const profileId = ref<string | null>(null); const destination = ref(""); const actionError = ref("");
-let debounce: ReturnType<typeof setTimeout> | undefined;
-watch(() => route.query, q => { selectedCollection.value = typeof q.collection === "string" ? q.collection : null; query.value = typeof q.q === "string" ? q.q : ""; seasonId.value = typeof q.season === "string" ? q.season : null; status.value = ["processing", "ready", "rendering", "failed"].includes(String(q.status)) ? q.status as ClipStatus : null; }, { immediate: true });
+let debounce: ReturnType<typeof setTimeout> | undefined; let searchPending = false;
+watch(() => route.query, q => { selectedCollection.value = typeof q.collection === "string" ? q.collection : null; if (!searchPending) query.value = typeof q.q === "string" ? q.q : ""; seasonId.value = typeof q.season === "string" ? q.season : null; status.value = ["processing", "ready", "rendering", "failed"].includes(String(q.status)) ? q.status as ClipStatus : null; }, { immediate: true });
 const seasonCollectionId = computed(() => seasonId.value ? seasonById(seasonId.value)?.collection_id ?? null : null);
 const filtered = computed(() => filterClips(clips.value, { collectionId: selectedCollection.value, seasonId: seasonId.value, seasonCollectionId: seasonCollectionId.value, query: query.value, status: status.value }));
 const counts = computed(() => Object.fromEntries(collections.value.map(c => [c.id, clips.value.filter(x => x.collection_id === c.id).length])));
@@ -32,8 +32,15 @@ const selectedCollectionModel = computed(() => collections.value.find(c => c.id 
 const collectionClips = computed(() => selectedCollection.value ? clips.value.filter(c => c.collection_id === selectedCollection.value) : []);
 const seasonOptions = computed(() => [{ id: "", name: t("common.all") }, ...seasons.value]);
 const statuses: (ClipStatus | "")[] = ["", "ready", "processing", "rendering", "failed"];
-function updateQuery(patch: Record<string, string | null>) { const q = { ...route.query }; for (const [key, value] of Object.entries(patch)) { if (value) q[key] = value; else delete q[key]; } void router.replace({ query: q }); }
-function updateSearch(value: string) { query.value = value; clearTimeout(debounce); debounce = setTimeout(() => updateQuery({ q: value || null }), 150); }
+// Typed text is the source of truth while the debounce is pending: other filters merge it into
+// their URL update, and the route watcher never copies a stale `q` back over the input.
+function updateQuery(patch: Record<string, string | null>) {
+  const q = { ...route.query };
+  if (searchPending) { clearTimeout(debounce); searchPending = false; patch = { q: query.value || null, ...patch }; }
+  for (const [key, value] of Object.entries(patch)) { if (value) q[key] = value; else delete q[key]; }
+  void router.replace({ query: q });
+}
+function updateSearch(value: string) { query.value = value; searchPending = true; clearTimeout(debounce); debounce = setTimeout(() => updateQuery({ q: query.value || null }), 150); }
 function chooseCollection(value: string | null) { selectedCollection.value = value; updateQuery({ collection: value }); }
 function toggleSelect(id: string) { selected.value = selected.value.includes(id) ? selected.value.filter(x => x !== id) : [...selected.value, id]; }
 function open(id: string) { void router.push({ name: "clip", params: { id }, query: route.query }); }
