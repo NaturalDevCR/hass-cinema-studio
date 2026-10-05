@@ -453,6 +453,9 @@ class JobQueue:
         directory.mkdir(parents=True, exist_ok=True)
         source = directory / f"original{inputs.original_path.suffix}"
         await asyncio.to_thread(_link, inputs.original_path, source)
+        # Hash the linked bytes, not the resolved metadata: the source may have been replaced
+        # between resolution and linking, and the fingerprint must describe what is rendered.
+        original_sha256 = await media.file_sha256(source)
         linked: dict[str, Path] = {}
         shas: dict[str, str | None] = {}
         for role, (path, _) in inputs.assets.items():
@@ -461,7 +464,7 @@ class JobQueue:
             linked[role] = destination
             shas[role] = await media.file_sha256(destination)
         fingerprint = inputs_fingerprint(
-            inputs.recipe, inputs.normalization, inputs.profile, inputs.original.sha256, shas
+            inputs.recipe, inputs.normalization, inputs.profile, original_sha256, shas
         )
         plan = RenderPlan(
             source=source,
@@ -510,6 +513,8 @@ class JobQueue:
         job = entry.job
         clip = self._repo.get_clip(clip_id)
         if clip.needs_source or clip.original is None:
+            # Settle the clip as failed (keeping its published render) rather than leaving it be.
+            entry.touched = True
             raise InvalidError("needs source: upload the original video in Organize")
         entry.touched = True
         self._repo.set_status(clip_id, "rendering" if clip.render is not None else "processing")

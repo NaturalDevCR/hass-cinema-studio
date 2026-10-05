@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cinema_studio import media
+from cinema_studio import jobs, media
 from cinema_studio.db import Database
 from cinema_studio.errors import NotFoundError
 from cinema_studio.fence import GarbageCollector, GcFence, GcResult
@@ -382,6 +382,53 @@ async def test_inputs_are_hard_linked_so_a_replaced_asset_cannot_change_the_job(
     assert repo.get_clip(clip.id).render.n == 3 and not repo.get_clip(clip.id).render_pending
 
 
+async def test_fingerprint_describes_the_bytes_linked_when_the_source_is_replaced_late(
+    queue, repo, store, paths, engine, make_video, monkeypatch
+):
+    clip = await uploaded(queue, repo, store, make_video)
+    stale_fingerprint = clip.render.profile_fingerprint
+    new_source = make_video(name="source-new.mp4", seconds=3)
+    target = original_path(paths, clip)
+    replacement = OriginalInfo(
+        filename=clip.original.filename,
+        size=new_source.stat().st_size,
+        sha256=sha256_of(new_source),
+        duration=3.0,
+        width=320,
+        height=180,
+        fps=24.0,
+        has_audio=True,
+        video_codec="h264",
+    )
+    real_link = jobs._link
+    swapped = []
+
+    def swapping_link(source, destination):
+        # The source is replaced after the metadata was resolved but before it is linked.
+        if not swapped and source == target:
+            swapped.append(True)
+            os.replace(new_source, target)
+        real_link(source, destination)
+
+    monkeypatch.setattr(jobs, "_link", swapping_link)
+    state = hook_engine(engine, monkeypatch, hold_call=2)
+    repo.set_recipe(clip.id, Recipe(gain_db=1.0))
+    first = queue.enqueue_render(clip.id)
+    await asyncio.wait_for(state.entered.wait(), 60)
+    published = repo.get_clip(clip.id)
+    assert first.status == "done" and published.render.n == 2
+    # The render used the new bytes while the catalog still described the old file.
+    assert published.render.duration < clip.render.duration - 0.5
+    assert published.render_pending
+    assert published.render.profile_fingerprint != stale_fingerprint
+    repo.set_original(clip.id, replacement)
+    state.release.set()
+    await queue.wait_idle()
+    fresh = repo.get_clip(clip.id)
+    assert fresh.render.n == 3 and not fresh.render_pending and fresh.status == "ready"
+    assert fresh.render.profile_fingerprint == published.render.profile_fingerprint
+
+
 async def test_missing_asset_fails_with_an_actionable_message(
     queue, repo, store, paths, make_video, small_profile_settings
 ):
@@ -429,8 +476,9 @@ async def test_clip_without_original_is_refused_and_left_untouched(queue, repo, 
     )
     job = queue.enqueue_render(clip.id)
     await queue.wait_idle()
+    failed = repo.get_clip(clip.id)
     assert job.status == "failed" and "needs source" in job.error
-    assert repo.get_clip(clip.id).status == "ready"
+    assert failed.status == "failed" and "needs source" in failed.error
 
 
 async def test_unexpected_errors_are_truncated_and_do_not_kill_the_worker(
