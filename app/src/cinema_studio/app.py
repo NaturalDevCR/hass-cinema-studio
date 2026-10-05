@@ -32,6 +32,7 @@ from .render import RenderEngine
 from .repository import Repository
 from .storage import MediaStore, recover
 from .supervisor import SupervisorClient
+from .uploads import UploadStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ def create_app(
         state.gc = gc
         state.gc_last = None  # (GcResult, finished_at) of the latest collection, for the UI
         state.jobs = JobQueue(repo, store, engine, paths, gc)
+        state.uploads = UploadStore(paths, lambda: repo.get_settings().max_upload_mb * 1024 * 1024)
         state.tokens = TokenStore(paths.data_dir / "api_token")
         state.supervisor = supervisor if supervisor is not None else SupervisorClient(None)
         state.notifier = None

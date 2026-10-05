@@ -602,3 +602,44 @@ async def test_housekeeping_discards_legacy_without_uploads(paths: Paths, made: 
     os.utime(run, (old, old))
     await lifecycle._clean_up(app)
     assert not run.exists()
+
+
+def _aged(path, age_seconds: float) -> None:
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
+
+
+async def test_housekeeping_deletes_test_renders_older_than_an_hour(
+    paths: Paths, made: list[FastAPI]
+):
+    app = build(made, paths, start_background=False)
+    directory = paths.renders_dir / "_test"
+    directory.mkdir(parents=True)
+    old, fresh = directory / "old-aaaaaaaa.mp4", directory / "fresh-bbbbbbbb.mp4"
+    for file in (old, fresh):
+        file.write_bytes(b"x")
+    _aged(old, 3601)
+    _aged(fresh, 3500)
+    published = paths.renders_dir / "clip" / "clip-r1-x.mp4"
+    published.parent.mkdir()
+    published.write_bytes(b"x")
+    _aged(published, 7200)
+    await lifecycle._clean_up(app)
+    assert not old.exists() and fresh.exists() and published.exists()
+
+
+async def test_test_render_cleanup_tolerates_a_missing_directory_and_errors(
+    paths: Paths, made: list[FastAPI], monkeypatch: pytest.MonkeyPatch
+):
+    app = build(made, paths, start_background=False)
+    assert lifecycle.purge_test_renders(paths) == 0  # no renders/_test yet
+    calls: list[int] = []
+
+    def broken(_: Paths) -> int:
+        calls.append(1)
+        raise OSError("gone")
+
+    monkeypatch.setattr(lifecycle, "purge_test_renders", broken)
+    app.state.uploads = None  # the rest of the cleanup still runs
+    await lifecycle._clean_up(app)
+    assert calls == [1]

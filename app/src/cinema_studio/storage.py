@@ -19,6 +19,8 @@ from .profiles import ProcessingProfile
 from .repository import Repository
 
 RENDER_NAME = re.compile(r"^(?P<clip>[0-9a-f-]{36})-r(?P<n>\d+)-(?P<uuid>[0-9a-f]{32})\.mp4$")
+# Short-lived copies of previews played on a device live here, outside the render catalog.
+TEST_RENDER_DIR = "_test"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -161,6 +163,8 @@ class MediaStore:
         for path in self.paths.renders_dir.rglob("*"):
             if not path.is_file():
                 continue
+            if path.relative_to(self.paths.renders_dir).parts[0] == TEST_RENDER_DIR:
+                continue  # test-on-device copies are not renders
             match = RENDER_NAME.fullmatch(path.name)
             if match is None:
                 _LOGGER.warning("Leaving non-render file untouched: %s", path)

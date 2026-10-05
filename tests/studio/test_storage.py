@@ -230,3 +230,22 @@ def test_nested_network_mount(paths, monkeypatch, location):
         Path, "read_text", lambda *a, **k: f"root / ext4 rw 0 0\nserver {target} nfs4 rw 0 0\n"
     )
     assert MediaStore(paths).is_network_fs()
+
+
+def test_test_on_device_copies_are_not_renders(paths, caplog):
+    store = MediaStore(paths)
+    store.ensure_dirs()
+    with closing(Database(paths.database_path)) as db:
+        repo = Repository(db)
+        clip = make_clip(repo)
+        copies = paths.renders_dir / "_test"
+        copies.mkdir()
+        (copies / f"{clip}-deadbeef.mp4").write_bytes(b"preview")
+        # Even a copy named exactly like a render is not one.
+        lookalike = f"{clip}-r1-{uuid4().hex}.mp4"
+        (copies / lookalike).write_bytes(b"preview")
+        assert store.scan_renders() == []
+        assert recover(store, repo) == {"unrecognized": 0, "missing": 0, "interrupted": 0}
+        assert repo.list_renders() == []
+        assert "Leaving non-render file" not in caplog.text
+        assert (copies / lookalike).exists()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
@@ -16,6 +17,8 @@ from typing import cast
 
 from fastapi import FastAPI
 
+from .config import Paths
+from .storage import TEST_RENDER_DIR
 from .supervisor import SupervisorClient, SupervisorError, describe_error
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,6 +28,7 @@ CATALOG_EVENT = "cinema_studio_catalog_changed"
 CATALOG_NOTIFY_DELAY = 1.0
 HOUSEKEEPING_INTERVAL = 600.0
 SERVER_WAIT_TIMEOUT = 10.0
+TEST_RENDER_MAX_AGE = 3600.0
 
 
 async def wait_for_server(
@@ -67,14 +71,35 @@ async def supervisor_startup(app: FastAPI) -> None:
 
 
 async def housekeeping(app: FastAPI, interval: float) -> None:
-    """Purge abandoned uploads/imports periodically and retry failed discovery."""
+    """Purge abandoned uploads/imports and old test renders; retry failed discovery."""
     while True:
         await _clean_up(app)
         await asyncio.sleep(interval)
         await _resync(app)
 
 
+def purge_test_renders(paths: Paths, max_age: float = TEST_RENDER_MAX_AGE) -> int:
+    """Delete test-on-device copies older than ``max_age`` seconds; returns how many went."""
+    directory = paths.renders_dir / TEST_RENDER_DIR
+    if directory.is_symlink() or not directory.is_dir():
+        return 0
+    cutoff = time.time() - max_age
+    removed = 0
+    for path in directory.iterdir():
+        try:
+            if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError as exc:
+            _LOGGER.warning("Could not remove test render %s: %s", path, exc)
+    return removed
+
+
 async def _clean_up(app: FastAPI) -> None:
+    try:
+        await asyncio.to_thread(purge_test_renders, app.state.paths)
+    except Exception:
+        _LOGGER.exception("Test render cleanup failed")
     uploads = getattr(app.state, "uploads", None)
     if uploads is not None:
         try:
