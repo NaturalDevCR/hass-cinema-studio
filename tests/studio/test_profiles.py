@@ -117,7 +117,11 @@ def test_settings_production_and_fingerprints():
 
     from cinema_studio.profiles import DEFAULT_PROFILE_ID, profile_fingerprint, validate_settings
 
-    settings = json.loads(Path(".superpowers/sdd/production-profile.json").read_text())["settings"]
+    settings = json.loads(
+        (Path(__file__).resolve().parents[1] / "fixtures" / "production-profile.json").read_text(
+            encoding="utf-8"
+        )
+    )["settings"]
     profile = ProcessingProfile.model_validate(settings)
     assert validate_settings(settings) == profile.model_dump(mode="json")
     assert DEFAULT_PROFILE_ID == "compatibility-4k-loudness"
