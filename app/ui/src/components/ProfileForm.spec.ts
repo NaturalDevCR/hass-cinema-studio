@@ -1,0 +1,84 @@
+vi.mock("@/composables/useJobs", () => {
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  return { useJobs: () => ({ refresh }) };
+});
+vi.mock("@/composables/useStudio", async (original) => {
+  const actual = await original<typeof import("@/composables/useStudio")>();
+  const refresh = vi.fn().mockResolvedValue(undefined),
+    refreshClips = vi.fn().mockResolvedValue(undefined);
+  return {
+    ...actual,
+    useStudio: () => ({ ...actual.useStudio(), refresh, refreshClips }),
+  };
+});
+import { mount, flushPromises } from "@vue/test-utils";
+import { it, expect, vi } from "vitest";
+import ProfileForm from "./ProfileForm.vue";
+import { useConfirm } from "@/composables/useConfirm";
+import { ui } from "@/api/client";
+import { makeNormProfile } from "@/test/factories";
+it.each([true, false])("confirms re-render after PATCH (answer %s)", async (answer) => {
+  const profile = makeNormProfile({ id: "soft" });
+  const update = vi.spyOn(ui.normProfiles, "update").mockResolvedValue({ profile, affected_clip_ids: ["a", "b"] });
+  const apply = vi.spyOn(ui.normProfiles, "apply").mockResolvedValue({ queued: 2 });
+  const w = mount(ProfileForm, { props: { profile } });
+  await w.get("form").trigger("submit");
+  await flushPromises();
+  expect(update).toHaveBeenCalledWith("soft", expect.objectContaining({ target_lufs: -16 }));
+  expect(useConfirm().request.value?.title).toContain("2");
+  expect(apply).not.toHaveBeenCalled();
+  useConfirm().answer(answer);
+  await flushPromises();
+  if (answer) expect(apply).toHaveBeenCalledWith("soft", { clip_ids: ["a", "b"] });
+  else expect(apply).not.toHaveBeenCalled();
+  expect(w.emitted("saved")).toHaveLength(1);
+  update.mockRestore();
+  apply.mockRestore();
+});
+it("rejects blank names and out-of-range loudness", async () => {
+  const create = vi.spyOn(ui.normProfiles, "create");
+  const w = mount(ProfileForm);
+  await w.get("form").trigger("submit");
+  expect(create).not.toHaveBeenCalled();
+  await w.get('[data-test="name"]').setValue("Test");
+  await w.get('[data-test="target_lufs"]').setValue("-31");
+  await w.get("form").trigger("submit");
+  expect(create).not.toHaveBeenCalled();
+  create.mockRestore();
+});
+it("shows apply failure inline and retries without PATCHing the saved profile again", async () => {
+  const profile = makeNormProfile({ id: "soft" });
+  const update = vi.spyOn(ui.normProfiles, "update").mockResolvedValue({ profile, affected_clip_ids: ["a"] });
+  const apply = vi
+    .spyOn(ui.normProfiles, "apply")
+    .mockRejectedValueOnce(new Error("render unavailable"))
+    .mockResolvedValue({ queued: 1 });
+  const w = mount(ProfileForm, { props: { profile } });
+  await w.get("form").trigger("submit");
+  await flushPromises();
+  useConfirm().answer(true);
+  await flushPromises();
+  expect(w.get('[role="alert"]').text()).toBe("render unavailable");
+  expect(w.emitted("saved")).toBeUndefined();
+  await w.get("form").trigger("submit");
+  await flushPromises();
+  useConfirm().answer(true);
+  await flushPromises();
+  expect(update).toHaveBeenCalledTimes(1);
+  expect(apply).toHaveBeenCalledTimes(2);
+  expect(w.emitted("saved")).toHaveLength(1);
+  update.mockRestore();
+  apply.mockRestore();
+});
+
+it("names every profile slider and announces the formatted values from the number inputs", async () => {
+  const w = mount(ProfileForm);
+  const sliders = w.findAll('input[type="range"]');
+  expect(sliders.map((s) => s.attributes("aria-label"))).toEqual([
+    "Target loudness (LUFS)", "Peak ceiling (dBTP)", "Loudness range (LU)",
+  ]);
+  expect(sliders.map((s) => s.attributes("aria-valuetext"))).toEqual(["−16.0 LUFS", "−1.5 dBTP", "11.0 LU"]);
+  await w.get('[data-test="true_peak"]').setValue("-2");
+  expect(sliders[1]!.attributes("aria-valuetext")).toBe("−2.0 dBTP");
+  w.unmount();
+});
