@@ -80,6 +80,8 @@
     {
       "variables": {
         "nuevo": {},
+        "nuevo_ok": false,
+        "seleccion": {},
         "ruta": "cinema_studio",
         "clip_uri": "",
         "clip_id": "",
@@ -104,7 +106,7 @@
     },
     {
       "variables": {
-        "nuevo_ok": "{% set r = nuevo if nuevo is mapping else {} %}{% set cid = r.get('clip_id') or '' %}{% set uri = r.get('media_content_id') or '' %}{% set d = r.get('duration') %}{% set s = r.get('content_start_offset') %}{% set e = r.get('content_end_offset') %}{% set l = r.get('lead_in_duration') %}{% set t = r.get('tail_out_duration') %}{{ r.get('contract_version') == 1 and r.get('timing_verified') is sameas true and r.get('file_verified') is sameas true and cid != '' and uri != '' and cid in uri and d is number and s is number and e is number and l is number and t is number and 0 < d <= 7200 and 0 <= s and s < e and e <= d + 0.001 and (s - l) | abs <= 0.002 and (d - e - t) | abs <= 0.002 }}"
+        "nuevo_ok": "{% set r = nuevo if nuevo is mapping else {} %}{% set cid = r.get('clip_id') %}{% set uri = r.get('media_content_id') %}{% set col = r.get('collection_id') %}{% set name = r.get('title') or r.get('source_name') or cid %}{% set d = r.get('duration') %}{% set ds = r.get('duration_seconds') %}{% set s = r.get('content_start_offset') %}{% set e = r.get('content_end_offset') %}{% set l = r.get('lead_in_duration') %}{% set t = r.get('tail_out_duration') %}{% set cd = r.get('content_duration') %}{% set tol = 0.0010001 %}{% set ids_ok = cid is string and cid | length > 0 and uri is string and col is string and col | length > 0 and name is string and name | length > 0 %}{% set uri_ok = ids_ok and uri.startswith('media-source://media_source/local/cinema-studio/renders/' ~ cid ~ '/') %}{% set nums_ok = (d is number and d is not boolean and d == d and (d) | abs < 100000) and (ds is number and ds is not boolean and ds == ds and (ds) | abs < 100000) and (s is number and s is not boolean and s == s and (s) | abs < 100000) and (e is number and e is not boolean and e == e and (e) | abs < 100000) and (l is number and l is not boolean and l == l and (l) | abs < 100000) and (t is number and t is not boolean and t == t and (t) | abs < 100000) and (cd is number and cd is not boolean and cd == cd and (cd) | abs < 100000) %}{{ (r.get('contract_version') == 1 and r.get('timing_verified') is sameas true and r.get('file_verified') is sameas true and ids_ok and uri_ok and nums_ok and ds == d and 0 < d <= 7200 and 0 <= s and s < e and e <= d and (s - l) | abs <= tol and (d - e - t) | abs <= tol and ((e - s) - cd) | abs <= tol) is sameas true }}"
       },
       "alias": "Cinema Studio: validar contrato completo"
     },
@@ -112,7 +114,7 @@
       "if": [
         {
           "condition": "template",
-          "value_template": "{{ nuevo_ok }}"
+          "value_template": "{{ nuevo_ok is sameas true }}"
         }
       ],
       "then": [

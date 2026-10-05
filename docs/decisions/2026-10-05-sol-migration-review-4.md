@@ -1,0 +1,9 @@
+Three blockers:
+
+1. **Validation can throw instead of falling back, and does not cover the fields subsequently consumed.** Non-string `clip_id`/URI can make `cid in uri` raise; missing `collection_id` or title fields can fail during mapping after validation passes. Require nonempty string identities, the expected media-source prefix/path correspondence, safe name extraction, finite non-boolean timing numbers, `duration_seconds == duration`, content-duration consistency, and the agreed bounds/tolerance. Both artifacts currently permit `end > duration` and use `0.002` instead of `0.001`. Malformed responses must produce `False`, never template errors. ([validator](/Users/jdavidoa91/Dev/hass-cinema-studio/docs/migration/cinema_reproducir_selection_block.json:107))
+
+2. **The selftest mutates production helpers on metadata failure.** Its fallback failure branch writes `input_text.cinema_resultado` and calls `script.cinema_registrar`, contradicting the promised isolation. Replace those actions with a returned failure result and assertions; preserve the production fallback unchanged. Also guard invalid-contract injection when `nuevo` is not a mapping. ([failure branch](/Users/jdavidoa91/Dev/hass-cinema-studio/docs/migration/cinema_studio_selftest.json:151), [injection](/Users/jdavidoa91/Dev/hass-cinema-studio/docs/migration/cinema_studio_selftest.json:80))
+
+3. **Predeclare `seleccion` in the production replacement’s outer INIT.** The selftest does this, but the replacement does not; both branches now assign it inside `if`. Add the declaration unless the untouched preceding steps demonstrably define it. HA documents updating previously defined variables across scopes, supporting your approach once the declaration is present. ([INIT](/Users/jdavidoa91/Dev/hass-cinema-studio/docs/migration/cinema_reproducir_selection_block.json:81), [HA variable scope](https://www.home-assistant.io/docs/scripts/#scope-of-variables))
+
+CONSENSUS: NO
