@@ -13,7 +13,11 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import async_fire_time_changed, mock_restore_cache
+from pytest_homeassistant_custom_component.common import (
+    async_fire_time_changed,
+    mock_restore_cache,
+    mock_restore_cache_with_extra_data,
+)
 
 from custom_components.cinema_studio.const import DOMAIN, STORAGE_VERSION
 from tests.integration.studio_support import (
@@ -248,6 +252,92 @@ async def test_override_select_maps_names_to_ids(hass, loaded_entry, aioclient_m
     assert loaded_entry.runtime_data.manager.override_season == "halloween"
 
 
+def _with_duplicate_season_names(payload):
+    twin = copy.deepcopy(payload)
+    twin["revision"] = 9
+    twin["seasons"].append({**twin["seasons"][1], "id": "halloween_two", "priority": 5})
+    return twin
+
+
+async def test_duplicate_season_names_are_disambiguated(
+    hass, loaded_entry, aioclient_mock, payload
+):
+    mock_studio(aioclient_mock, _with_duplicate_season_names(payload))
+    await refresh(hass, loaded_entry)
+    override = "select.cinema_studio_season_override"
+    assert hass.states.get(override).attributes["options"] == [
+        "Auto",
+        "Regular",
+        "Halloween (halloween)",
+        "Halloween (halloween_two)",
+    ]
+    await select_option(hass, override, "Halloween (halloween_two)")
+    assert loaded_entry.runtime_data.manager.override_season == "halloween_two"
+    assert hass.states.get(override).state == "Halloween (halloween_two)"
+    await select_option(hass, override, "Halloween (halloween)")
+    assert loaded_entry.runtime_data.manager.override_season == "halloween"
+
+
+async def test_override_restores_season_id_with_duplicate_names(
+    hass, aioclient_mock, payload, media_root
+):
+    twin = _with_duplicate_season_names(payload)
+    write_renders(media_root, twin)
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State("select.cinema_studio_season_override", "Halloween (halloween_two)"),
+                {"season_id": "halloween_two"},
+            )
+        ],
+    )
+    entry = new_entry(hass)
+    mock_studio(aioclient_mock, twin)
+    await setup(hass, entry)
+    assert entry.runtime_data.manager.override_season == "halloween_two"
+    assert hass.states.get("select.cinema_studio_season_override").state == (
+        "Halloween (halloween_two)"
+    )
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_override_extra_data_round_trips_season_id(hass, loaded_entry):
+    select = hass.data["entity_components"]["select"].get_entity(
+        "select.cinema_studio_season_override"
+    )
+    await select_option(hass, "select.cinema_studio_season_override", "Halloween")
+    assert select.extra_restore_state_data.as_dict() == {"season_id": "halloween"}
+    await select_option(hass, "select.cinema_studio_season_override", "Auto")
+    assert select.extra_restore_state_data.as_dict() == {"season_id": None}
+
+
+async def test_override_not_restored_from_ambiguous_name(hass, aioclient_mock, payload, media_root):
+    twin = _with_duplicate_season_names(payload)
+    write_renders(media_root, twin)
+    mock_restore_cache(hass, [State("select.cinema_studio_season_override", "Halloween")])
+    entry = new_entry(hass)
+    mock_studio(aioclient_mock, twin)
+    await setup(hass, entry)
+    assert entry.runtime_data.manager.override_season is None
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_override_restored_from_unique_name_without_extra_data(
+    hass, aioclient_mock, payload, media_root
+):
+    write_renders(media_root, payload)
+    mock_restore_cache_with_extra_data(
+        hass,
+        [(State("select.cinema_studio_season_override", "Halloween"), {"season_id": "gone"})],
+    )
+    entry = new_entry(hass)
+    mock_studio(aioclient_mock, payload)
+    await setup(hass, entry)
+    assert entry.runtime_data.manager.override_season == "halloween"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_collection_sensor_before_any_selection(hass, loaded_entry):
     state = hass.states.get("sensor.cinema_studio_regular_last")
     assert state.state == STATE_UNKNOWN
@@ -349,6 +439,20 @@ async def test_collection_rename_updates_friendly_name(hass, loaded_entry, aiocl
     state = hass.states.get("sensor.cinema_studio_spooky_last")
     assert state.name == "Cinema Studio Terror last"
     assert state.attributes["icon"] == "mdi:skull"
+    # Identity follows the stable collection id, not the (renamable) name.
+    registered = er.async_get(hass).async_get("sensor.cinema_studio_spooky_last")
+    assert registered is not None
+    assert registered.unique_id == f"{loaded_entry.entry_id}_collection_spooky"
+
+
+async def test_collection_sensor_icon_fallback(hass, loaded_entry, aioclient_mock, payload):
+    bare = copy.deepcopy(payload)
+    bare["revision"] = 8
+    bare["collections"][1]["icon"] = ""
+    mock_studio(aioclient_mock, bare)
+    await refresh(hass, loaded_entry)
+    state = hass.states.get("sensor.cinema_studio_spooky_last")
+    assert state.attributes["icon"] == "mdi:movie-open"
 
 
 async def test_stale_collection_entities_removed_at_setup(
@@ -455,3 +559,28 @@ async def test_unload_detaches_listeners(hass, loaded_entry):
     entities = er.async_entries_for_config_entry(er.async_get(hass), loaded_entry.entry_id)
     assert len(entities) == 6
     assert {hass.states.get(item.entity_id).state for item in entities} == {STATE_UNAVAILABLE}
+
+
+async def test_listener_remover_is_idempotent(hass, loaded_entry):
+    manager = loaded_entry.runtime_data.manager
+    calls = []
+    remove = manager.async_add_listener(lambda: calls.append(1))
+    remove()
+    remove()  # a second removal is ignored
+    manager._notify_listeners()
+    assert calls == []
+
+
+async def test_failed_activation_does_not_notify_listeners(hass, loaded_entry):
+    manager = loaded_entry.runtime_data.manager
+    calls = []
+    remove = manager.async_add_listener(lambda: calls.append(1))
+    with (
+        patch.object(manager._store, "async_save", side_effect=OSError("disk full")),
+        pytest.raises(OSError),
+    ):
+        await manager.async_evaluate_activation()
+    assert calls == []
+    await manager.async_evaluate_activation()
+    assert calls == [1]
+    remove()

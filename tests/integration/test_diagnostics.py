@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 from homeassistant.components.diagnostics import REDACTED
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.cinema_studio.const import DOMAIN
 from custom_components.cinema_studio.diagnostics import async_get_config_entry_diagnostics
-from tests.integration.studio_support import mock_offline
+from tests.integration.studio_support import mock_offline, mock_studio, setup, write_renders
 
 pytestmark = pytest.mark.integration
 
@@ -21,7 +23,7 @@ async def test_diagnostics_redacts_token_and_summarizes_runtime(hass, loaded_ent
     before = manager._state()
     result = await async_get_config_entry_diagnostics(hass, loaded_entry)
     assert result["entry_data"] == {"host": "studio", "port": 8099, "token": REDACTED}
-    assert result["options"] == dict(loaded_entry.options)
+    assert result["options"] == dict(loaded_entry.options)  # holds no credentials
     assert result["catalog"] == {
         "revision": 7,
         "seasons": 2,
@@ -45,6 +47,30 @@ async def test_diagnostics_redacts_token_and_summarizes_runtime(hass, loaded_ent
     assert "secret" not in repr(result)
     assert loaded_entry.data["token"] == "secret"
     assert manager._state() == before
+
+
+async def test_diagnostics_redacts_token_in_options_and_nested_fields(
+    hass, aioclient_mock, payload, media_root
+):
+    write_renders(media_root, payload)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"host": "studio", "port": 8099, "token": "secret", "extra": {"api_token": "s1"}},
+        unique_id="studio-id",
+        options={"scan_interval": 3600, "token": "s2", "nested": [{"api_token": "s3"}]},
+    )
+    entry.add_to_hass(hass)
+    mock_studio(aioclient_mock, payload)
+    await setup(hass, entry)
+    result = await async_get_config_entry_diagnostics(hass, entry)
+    assert result["entry_data"]["token"] == REDACTED
+    assert result["entry_data"]["extra"] == {"api_token": REDACTED}
+    assert result["options"]["token"] == REDACTED
+    assert result["options"]["nested"] == [{"api_token": REDACTED}]
+    assert result["options"]["scan_interval"] == 3600
+    for leaked in ("secret", "s1", "s2", "s3"):
+        assert f"'{leaked}'" not in repr(result)
+    assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 async def test_diagnostics_offline_and_idle(hass, loaded_entry):

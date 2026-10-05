@@ -313,10 +313,8 @@ class CinemaStudioManager:
         return reset is not None
 
     async def async_evaluate_activation(self) -> None:
-        try:
-            await self._evaluate_activation()
-        finally:
-            self._notify_listeners()
+        await self._evaluate_activation()
+        self._notify_listeners()  # only a completed evaluation publishes new state
 
     async def _evaluate_activation(self) -> None:
         async with self._lock:
@@ -508,7 +506,8 @@ class CinemaStudioManager:
 
         @callback
         def remove() -> None:
-            self._listeners.remove(update)
+            if update in self._listeners:
+                self._listeners.remove(update)
 
         return remove
 

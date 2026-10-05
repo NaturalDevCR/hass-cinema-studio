@@ -11,6 +11,8 @@ from homeassistant.core import HomeAssistant
 from . import CinemaStudioConfigEntry
 from .const import CONF_TOKEN
 
+REDACTED_KEYS = {CONF_TOKEN, "token", "api_token"}
+
 
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: CinemaStudioConfigEntry
@@ -19,8 +21,8 @@ async def async_get_config_entry_diagnostics(
     state = entry.runtime_data.coordinator.data
     catalog = state.catalog
     return {
-        "entry_data": async_redact_data(dict(entry.data), {CONF_TOKEN}),
-        "options": dict(entry.options),
+        "entry_data": async_redact_data(dict(entry.data), REDACTED_KEYS),
+        "options": async_redact_data(dict(entry.options), REDACTED_KEYS),
         "catalog": {
             "revision": catalog.revision,
             "seasons": len(catalog.seasons),
