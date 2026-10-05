@@ -537,3 +537,69 @@ async def test_manager_setup_failure_ha_retries(hass, entry, failure):
         assert not await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_remove_entry_clears_repairs(hass, entry):
+    from custom_components.cinema_studio import async_remove_entry
+
+    for issue_id in ("consumer_corrupt", "invalid_catalog"):
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=issue_id,
+        )
+    ir.async_create_issue(
+        hass,
+        "other_domain",
+        "consumer_corrupt",
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="consumer_corrupt",
+    )
+    await async_remove_entry(hass, entry)
+    registry = ir.async_get(hass)
+    assert registry.async_get_issue(DOMAIN, "consumer_corrupt") is None
+    assert registry.async_get_issue(DOMAIN, "invalid_catalog") is None
+    assert registry.async_get_issue("other_domain", "consumer_corrupt") is not None
+
+
+async def test_refresh_task_owned_by_entry(hass, entry, aioclient_mock, catalog_payload):
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    with patch.object(
+        entry, "async_create_background_task", wraps=entry.async_create_background_task
+    ) as create:
+        await entry.runtime_data.coordinator.async_refresh()
+        assert create.called
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_unload_cancels_selection_flush(hass, entry, aioclient_mock, catalog_payload):
+    import asyncio
+
+    online(aioclient_mock, catalog_payload)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def post(events):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    manager = entry.runtime_data.manager
+    with patch.object(entry.runtime_data.client, "post_selections", side_effect=post):
+        await manager.async_select(collection_ref=None, season_ref=None, dry_run=False)
+        await started.wait()
+        assert entry._background_tasks
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        assert cancelled.is_set()
+        assert not entry._background_tasks
+    assert len((await manager._store.async_load())["selection_queue"]) == 1

@@ -10,6 +10,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
@@ -65,7 +66,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CinemaStudioConfigEntry)
         await manager.async_flush_selections()
 
     def updated() -> None:
-        hass.async_create_task(refresh_manager())
+        entry.async_create_background_task(hass, refresh_manager(), "Cinema Studio manager refresh")
 
     entry.async_on_unload(coordinator.async_add_listener(updated))
 
@@ -95,3 +96,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: CinemaStudioConfigEntry
     await Store[dict[str, Any]](
         hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.state"
     ).async_remove()
+
+    # The integration permits one entry; these repair IDs belong to that entry.
+    for issue_id in ("consumer_corrupt", "invalid_catalog"):
+        ir.async_delete_issue(hass, DOMAIN, issue_id)

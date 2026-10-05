@@ -96,6 +96,7 @@ class CinemaStudioManager:
         self._selection_queue: list[dict[str, Any]] = []
         self._last: dict[str, dict[str, Any]] = {}
         self._ready = False
+        self._reverify_fence_failed = False
         self._listeners_registered = False
         self.override_season: str | None = None
 
@@ -159,7 +160,10 @@ class CinemaStudioManager:
             )
             self._selection_queue = data.get("selection_queue", [])
             if self._cap_queue():
-                await self._store.async_save(self._state())
+                try:
+                    await self._store.async_save(self._state())
+                except Exception as err:
+                    raise ConfigEntryNotReady("Unable to save capped selection queue") from err
             from .coordinator import CinemaStudioState
 
             state = cast(CinemaStudioState | None, self.coordinator.data)
@@ -178,6 +182,7 @@ class CinemaStudioManager:
             except (FenceTimeout, OSError) as err:
                 raise ConfigEntryNotReady("Consumer fence is unavailable") from err
             self._ready = True
+            self._reverify_fence_failed = False
             ir.async_delete_issue(self.hass, DOMAIN, "consumer_corrupt")
         if not self._listeners_registered:
 
@@ -200,7 +205,9 @@ class CinemaStudioManager:
                 async_track_time_interval(self.hass, reverify, timedelta(minutes=5))
             )
             self._listeners_registered = True
-        self.hass.async_create_task(self.async_flush_selections())
+        self.entry.async_create_background_task(
+            self.hass, self.async_flush_selections(), "Cinema Studio selection flush"
+        )
 
     async def async_install_snapshot(
         self,
@@ -222,6 +229,7 @@ class CinemaStudioManager:
             await persist(raw)
             self._catalog, self._verified = catalog, verified
             self._ready = True
+            self._reverify_fence_failed = False
             ir.async_delete_issue(self.hass, DOMAIN, "consumer_corrupt")
             try:
                 result = await self._write_fence(catalog.revision, catalog.render_ids())
@@ -412,7 +420,11 @@ class CinemaStudioManager:
                             self._selection_queue = previous_queue
                             raise
                         self._last[collection.id] = dict(response)
-                        self.hass.async_create_task(self.async_flush_selections())
+                        self.entry.async_create_background_task(
+                            self.hass,
+                            self.async_flush_selections(),
+                            "Cinema Studio selection flush",
+                        )
                         self.hass.bus.async_fire(EVENT_SELECTED, dict(response))
                     return dict(response)
                 raise _error("no_playable_clip")
@@ -475,11 +487,13 @@ class CinemaStudioManager:
                 self._corrupt()
                 return
             except (FenceTimeout, OSError):
-                self._ready = False
-                _LOGGER.warning("Render re-verification fence failed", exc_info=True)
+                if not self._reverify_fence_failed:
+                    _LOGGER.warning("Render re-verification fence failed; retaining current state")
+                self._reverify_fence_failed = True
                 return
             self._verified, self._pins = verified, result.pins
             self._ready = True
+            self._reverify_fence_failed = False
             ir.async_delete_issue(self.hass, DOMAIN, "consumer_corrupt")
 
     async def async_flush_selections(self) -> None:

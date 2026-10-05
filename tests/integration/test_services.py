@@ -52,12 +52,16 @@ async def test_unloaded(hass):
 
 
 @pytest.mark.parametrize("language", ["en", "es"])
-def test_service_descriptions(language):
+def test_service_descriptions(language, monkeypatch, tmp_path):
     import json
     from pathlib import Path
 
+    monkeypatch.chdir(tmp_path)
     data = json.loads(
-        Path(f"custom_components/cinema_studio/translations/{language}.json").read_text()
+        (
+            Path(__file__).resolve().parents[2]
+            / f"custom_components/cinema_studio/translations/{language}.json"
+        ).read_text()
     )
     for service in data["services"].values():
         assert service["description"] != service["name"]

@@ -319,7 +319,7 @@ async def test_queue_rejected_events_dropped(manager, caplog):
     await manager.async_flush_selections()
     assert manager._selection_queue == []
     assert (await manager._store.async_load())["selection_queue"] == []
-    assert "rejected" in caplog.text
+    assert any(r.levelname == "WARNING" and "rejected" in r.message for r in caplog.records)
 
 
 async def test_queue_bounded(manager, caplog):
@@ -406,6 +406,66 @@ async def test_injected_client(hass, media_root, catalog_payload):
     manager = CinemaStudioManager(hass, entry, coordinator, client=client, now=lambda: NOW)
     await manager.async_setup()
     await select(manager)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     client.post_selections.assert_awaited_once()
     coordinator._client.post_selections.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "os"])
+async def test_reverify_transient_failure_keeps_selection_ready(manager, caplog, failure):
+    from custom_components.cinema_studio.fence import FenceTimeout
+
+    error = FenceTimeout("busy") if failure == "timeout" else OSError("unavailable")
+    with patch.object(manager, "_write_fence", side_effect=error):
+        await manager.async_reverify()
+        await manager.async_reverify()
+    warnings = [r for r in caplog.records if "re-verification fence failed" in r.message]
+    assert len(warnings) == 1
+    assert warnings[0].levelname == "WARNING"
+    assert warnings[0].exc_info is None
+    assert manager.ready
+    assert (await select(manager))["clip_id"] == "clip-a"
+    await manager.async_reverify()
+    with patch.object(manager, "_write_fence", side_effect=error):
+        await manager.async_reverify()
+    warnings = [r for r in caplog.records if "re-verification fence failed" in r.message]
+    assert len(warnings) == 2
+
+
+async def test_queue_cap_on_load(manager, caplog):
+    data = manager._state()
+    data["selection_queue"] = [{"selection_id": str(i)} for i in range(2003)]
+    await manager._store.async_save(data)
+    await manager.async_setup()
+    assert len(manager._selection_queue) == 2000
+    assert manager._selection_queue[0]["selection_id"] == "3"
+    assert manager._selection_queue[-1]["selection_id"] == "2002"
+    assert (await manager._store.async_load())["selection_queue"] == manager._selection_queue
+    assert any(r.levelname == "WARNING" and "oldest" in r.message for r in caplog.records)
+
+
+async def test_queue_cap_setup_save_failure_retries(manager):
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    data = manager._state()
+    data["selection_queue"] = [{"selection_id": str(i)} for i in range(2001)]
+    await manager._store.async_save(data)
+    with (
+        patch.object(manager._store, "async_save", side_effect=OSError("disk full")),
+        pytest.raises(ConfigEntryNotReady),
+    ):
+        await manager.async_setup()
+    assert not manager.ready
+
+
+async def test_flush_tasks_owned_by_entry(manager):
+    await manager.hass.async_block_till_done(wait_background_tasks=True)
+    with patch.object(
+        manager.entry,
+        "async_create_background_task",
+        wraps=manager.entry.async_create_background_task,
+    ) as create:
+        await manager.async_setup()
+        await select(manager)
+        assert create.call_count == 2
+    await manager.hass.async_block_till_done(wait_background_tasks=True)
