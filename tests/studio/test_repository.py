@@ -938,3 +938,78 @@ def test_catalog_document_excludes_clips_whose_render_is_not_published(repo: Rep
     repo.mark_render(render.id, "missing")
     assert repo.catalog_document("i")["clips"] == []
     assert repo.catalog_document("i")["revision"] == repo.catalog_revision()
+
+
+def test_atomic_legacy_clip(repo: Repository, revisions: list[int]) -> None:
+    before = repo.catalog_revision()
+    render = make_render("legacy-1", timing_source="legacy_worker")
+    clip = repo.import_legacy_clip(
+        clip_id="legacy-1",
+        collection_id="regular",
+        title="Movie",
+        source_name="movie.mp4",
+        recipe=Recipe(),
+        original=original(),
+        sort_key="regular/legacy-1.mp4",
+        render=render,
+    )
+    assert clip.render is not None and clip.render.id == render.id
+    assert clip.status == "ready"
+    assert repo.catalog_revision() == before + 1
+    assert revisions == [before + 1]
+
+
+def test_atomic_legacy_clip_rolls_back_render_conflict(repo: Repository) -> None:
+    existing = make_clip(repo)
+    render = make_render(existing)
+    repo.publish_render(render)
+    before = repo.catalog_revision()
+    with pytest.raises(ConflictError):
+        repo.import_legacy_clip(
+            clip_id="legacy-2",
+            collection_id="regular",
+            title="Movie",
+            source_name="movie.mp4",
+            recipe=Recipe(),
+            original=original(),
+            sort_key="k",
+            render=render.model_copy(update={"clip_id": "legacy-2"}),
+        )
+    with pytest.raises(NotFoundError):
+        repo.get_clip("legacy-2")
+    assert repo.catalog_revision() == before
+    assert len(repo.list_renders()) == 1
+
+
+def test_atomic_legacy_clip_rejects_invalid_timing(repo: Repository) -> None:
+    before = repo.catalog_revision()
+    with pytest.raises(InvalidError):
+        repo.import_legacy_clip(
+            clip_id="legacy-3",
+            collection_id="regular",
+            title="Movie",
+            source_name="movie.mp4",
+            recipe=Recipe(),
+            original=original(),
+            sort_key="k",
+            render=make_render("legacy-3", content_end=1000),
+        )
+    assert repo.list_clips() == []
+    assert repo.catalog_revision() == before
+
+
+def test_atomic_legacy_clip_without_output(repo: Repository) -> None:
+    before = repo.catalog_revision()
+    clip = repo.import_legacy_clip(
+        clip_id="legacy-4",
+        collection_id="regular",
+        title="Movie",
+        source_name="movie.mp4",
+        recipe=Recipe(),
+        original=None,
+        sort_key="k",
+        needs_source=True,
+        render=None,
+    )
+    assert clip.render is None and clip.needs_source and clip.status == "processing"
+    assert repo.catalog_revision() == before + 1

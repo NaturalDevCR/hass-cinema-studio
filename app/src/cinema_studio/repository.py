@@ -879,6 +879,87 @@ class Repository:
             )
             return _get_clip(conn, new_id)
 
+    def import_legacy_clip(
+        self,
+        *,
+        clip_id: str,
+        collection_id: str,
+        title: str,
+        source_name: str,
+        recipe: Recipe,
+        original: OriginalInfo | None,
+        sort_key: str,
+        needs_source: bool = False,
+        render: RenderRecord | None,
+    ) -> Clip:
+        """Create an imported clip and optional r1 in one transaction, bumping once.
+
+        The caller places files first and removes the new links if this fails.
+        Existing clips are never changed.
+        """
+        clean_title = _clean_text("title", title)
+        if not _CLIP_ID.fullmatch(clip_id):
+            raise InvalidError(f"Invalid clip id '{clip_id}'.")
+        if original is not None:
+            recipe.validate_for(original)
+        now = utcnow_iso()
+        if render is not None:
+            if render.clip_id != clip_id or render.n != 1:
+                raise InvalidError("An imported render must be r1 of the imported clip.")
+            timing = validate_timing(
+                Timing(
+                    duration=render.duration,
+                    content_start=render.content_start,
+                    content_end=render.content_end,
+                    lead_in=render.lead_in,
+                    tail_out=render.tail_out,
+                    content_duration=render.content_duration,
+                )
+            )
+            render = render.model_copy(
+                update={
+                    **timing.as_dict(),
+                    "state": "published",
+                    "published_at": now,
+                    "retired_at": None,
+                    "retired_revision": None,
+                }
+            )
+        with self._write() as tx:
+            conn = tx.conn
+            if conn.execute("SELECT 1 FROM clips WHERE id = ?", (clip_id,)).fetchone():
+                raise ConflictError(f"Clip '{clip_id}' already exists.")
+            _check_collection(conn, collection_id)
+            _check_normalization_profile(conn, recipe.profile_id)
+            conn.execute(
+                "INSERT INTO clips (id, collection_id, title, source_name, original, recipe,"
+                " status, needs_source, sort_key, created_at, updated_at, published_render_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    clip_id,
+                    collection_id,
+                    clean_title,
+                    source_name,
+                    original.model_dump_json() if original else None,
+                    recipe.model_dump_json(),
+                    "ready" if render is not None else "processing",
+                    int(needs_source),
+                    sort_key,
+                    now,
+                    now,
+                    render.id if render is not None else None,
+                ),
+            )
+            if render is not None:
+                try:
+                    _insert_render(conn, render)
+                except sqlite3.IntegrityError as error:
+                    raise ConflictError(
+                        f"Render '{render.id}' cannot be recorded: {error}"
+                    ) from error
+            tx.bump = True
+            return _get_clip(conn, clip_id)
+
     def update_clip(self, clip_id: str, data: ClipUpdate) -> Clip:
         with self._write() as tx:
             clip = _get_clip(tx.conn, clip_id)

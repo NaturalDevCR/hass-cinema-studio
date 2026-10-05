@@ -24,6 +24,7 @@ from .errors import ConflictError, InvalidError, NotFoundError
 from .fence import GarbageCollector, GcFence
 from .ffmpeg import FfmpegCommandBuilder
 from .jobs import JobQueue, render_timeout
+from .legacy import LegacyImporter
 from .models import ProcessingProfileUpdate
 from .notifier import CatalogNotifier
 from .profiles import validate_settings
@@ -93,7 +94,7 @@ def create_app(
         state.tokens = TokenStore(paths.data_dir / "api_token")
         state.supervisor = supervisor if supervisor is not None else SupervisorClient(None)
         state.notifier = None
-        state.legacy = None  # set by the legacy import task
+        state.legacy = LegacyImporter(paths, repo, store, state.jobs)
         state.instance_id = _load_instance_id(paths.data_dir / "instance_id")
         state.discovery_status = {
             "status": "unavailable",

@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from . import __version__
 from .auth import require_bearer
+from .legacy import LegacyImporter, LegacyStageRequest, legacy_request
 from .models import SelectionBatch
 from .repository import Repository
 
@@ -80,10 +81,16 @@ async def selections(request: Request) -> Response:
 
 @router.post("/import/legacy")
 async def import_legacy(request: Request) -> Response:
-    # ``app.state.legacy`` stays None until the legacy import task adds the importer and replaces
-    # this body with the stage/commit dispatch.
-    del request
-    raise HTTPException(status_code=501, detail="The legacy import is not available yet")
+    try:
+        body = legacy_request.validate_json(await request.body())
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors(include_url=False, include_input=False)) from exc
+    importer: LegacyImporter = request.app.state.legacy
+    if isinstance(body, LegacyStageRequest):
+        result = await importer.stage(body.manifest)
+    else:
+        result = await importer.commit(body.run_id, body.clips)
+    return JSONResponse(result.model_dump(mode="json"))
 
 
 def _etag(revision: int) -> str:

@@ -419,15 +419,15 @@ def test_malformed_bodies_get_a_string_detail(client: TestClient, auth: dict[str
         assert isinstance(response.json()["detail"], str)
 
 
-# --- legacy import (wired in a later task) ---------------------------------------------------
+# --- legacy import --------------------------------------------------------------------------
 
 
-def test_legacy_import_is_not_implemented_until_the_importer_exists(
+def test_legacy_import_validates_stage_manifest(
     app: FastAPI, client: TestClient, auth: dict[str, str]
 ):
-    assert app.state.legacy is None
+    assert app.state.legacy is not None
     response = client.post("/api/v1/import/legacy", json={"phase": "stage"}, headers=auth)
-    assert response.status_code == 501
+    assert response.status_code == 422
     assert isinstance(response.json()["detail"], str)
 
 
@@ -558,7 +558,7 @@ def test_create_app_prepares_state_without_background_work(app: FastAPI, paths: 
         assert hasattr(state, name), name
     assert state.paths is paths
     assert state.notifier is None
-    assert state.legacy is None
+    assert state.legacy is not None
     assert not state.supervisor.available
     assert state.discovery_status["status"] == "unavailable"
     assert (paths.data_dir / "api_token").is_file()
