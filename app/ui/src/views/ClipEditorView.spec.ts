@@ -3,13 +3,15 @@ import { beforeEach, afterEach, it, expect, vi } from "vitest";
 import { defineComponent, h } from "vue";
 import { createRouter, createMemoryHistory, RouterView } from "vue-router";
 import ClipEditorView from "./ClipEditorView.vue";
-import { makeClip } from "@/test/factories";
+import { makeClip, makeCollection } from "@/test/factories";
 import { makeState } from "@/test/system";
 import { useStudio } from "@/composables/useStudio";
 import { useJobs } from "@/composables/useJobs";
 import { useConfirm } from "@/composables/useConfirm";
 import type { Job } from "@/api/types";
 import { useI18n } from "@/i18n";
+import { useToast } from "@/composables/useToast";
+import { productionProfile } from "@/test/production-profile";
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   list: vi.fn(),
@@ -21,6 +23,21 @@ const mocks = vi.hoisted(() => ({
   jobs: vi.fn(),
   uploads: { create: vi.fn(), chunk: vi.fn() },
 }));
+const releases = vi.hoisted(() => [] as ReturnType<typeof vi.fn>[]);
+vi.mock("@/composables/useJobs", async (original) => {
+  const actual = await original<typeof import("@/composables/useJobs")>();
+  return {
+    ...actual,
+    useJobs: () => ({
+      ...actual.useJobs(),
+      suppressPreviewToast: (clipId: string) => {
+        const release = vi.fn(actual.useJobs().suppressPreviewToast(clipId));
+        releases.push(release);
+        return release;
+      },
+    }),
+  };
+});
 vi.mock("@/api/client", async (original) => ({
   ...(await original<typeof import("@/api/client")>()),
   api: vi
@@ -78,6 +95,7 @@ async function setup() {
       { path: "/clips/:id", component: ClipEditorView, props: true },
       { path: "/", name: "library", component: { template: "<div />" } },
       { path: "/system", component: { template: "<div />" } },
+      { path: "/organize", component: { template: "<div />" } },
     ],
   });
   activeRouter = router;
@@ -176,11 +194,12 @@ it("filters protected and non-media-player targets", async () => {
 it("plays a completed preview and invalidates it on further edits", async () => {
   mocks.preview.mockResolvedValue({ job: previewJob });
   mocks.jobs.mockResolvedValue([previewJob]);
-  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+  const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
   const w = await setup();
   await w.get("[data-test=trim-start]").setValue("1");
   await w.get("[data-test=preview-render]").trigger("click");
   await flushPromises();
+  expect(play).toHaveBeenCalled();
   expect(mocks.preview).toHaveBeenCalledWith(
     "a",
     expect.objectContaining({ trim_start: 1 }),
@@ -264,4 +283,100 @@ it("repairs source with chunk upload, without completing a new clip", async () =
   ]);
   expect(mocks.replaceSource).toHaveBeenCalledWith("a", "upload-1");
   expect(w.find("input[type=file]").exists()).toBe(false);
+});
+
+it("does not trust a server-side preview from an earlier session", async () => {
+  mocks.get.mockResolvedValue(makeClip({ id: "a", has_preview: true }));
+  const w = await setup();
+  const buttons = w.findAll("button").filter((b) => b.text() === "Preview");
+  expect(buttons[0]!.attributes("disabled")).toBeDefined();
+  expect(w.get("video").attributes("src")).toContain("/original");
+});
+it("does not dirty the recipe when locking 16:9 without a crop", async () => {
+  const w = await setup();
+  await w.get("input[type=checkbox]").setValue(true);
+  expect(w.get("[data-test=save]").attributes("disabled")).toBeDefined();
+  expect(w.get("[data-test=revert]").attributes("disabled")).toBeDefined();
+});
+it("deep-links a missing asset warning to Organize assets", async () => {
+  useStudio().collections.value = [
+    { ...makeCollection({ id: "regular", name: "Regular" }), processing_profile_id: "compatibility-4k-loudness" },
+  ];
+  useStudio().procProfiles.value = [{ ...productionProfile, id: "compatibility-4k-loudness", name: "C" }];
+  useStudio().assets.value = [
+    { filename: productionProfile.settings.intro_reference!, size: null, sha256: null, status: "missing" },
+  ];
+  const w = await setup();
+  const link = w.get("a[href*='/organize']");
+  expect(link.attributes("href")).toBe("/organize?tab=assets");
+  await link.trigger("click");
+  await flushPromises();
+  expect(activeRouter.currentRoute.value.query.tab).toBe("assets");
+});
+it("labels job kinds, timing source and loudness through i18n", async () => {
+  useJobs().jobs.value = [{ ...previewJob, id: "j", status: "running", progress: 0.4 }];
+  mocks.get.mockResolvedValue(
+    makeClip({ id: "a", render: { ...makeClip({ id: "a" }).render!, timing_source: "legacy_worker" } }),
+  );
+  const w = await setup();
+  expect(w.text()).toContain("Preview");
+  expect(w.text()).toContain("Legacy worker");
+  expect(w.text()).toContain("Loudness (LUFS)");
+  expect(w.text()).not.toContain("legacy_worker");
+  useI18n().setLocale("es");
+  await flushPromises();
+  expect(w.text()).not.toContain("Loudness (LUFS)");
+  expect(w.text()).not.toContain("Legacy worker");
+});
+it("warns instead of silently ignoring a close while saving", async () => {
+  let release!: (v: unknown) => void;
+  mocks.putRecipe.mockImplementation(() => new Promise((r) => (release = r)));
+  const w = await setup();
+  await w.get("[data-test=trim-start]").setValue("1");
+  await w.get("[data-test=save]").trigger("click");
+  await flushPromises();
+  await activeRouter.push("/");
+  expect(activeRouter.currentRoute.value.path).toBe("/clips/a");
+  expect(useToast().toasts.value.map((t) => t.message)).toContain("Wait for saving to finish before closing.");
+  release({ clip: makeClip({ id: "a" }), job: {} });
+  await flushPromises();
+});
+it("explains a blank title", async () => {
+  const w = await setup();
+  expect(w.find("[data-test=title-error]").exists()).toBe(false);
+  await w.get("input[data-test=title]").setValue("  ");
+  expect(w.get("[data-test=title-error]").text()).toBe("Enter a title.");
+  expect(w.get("[data-test=save]").attributes("disabled")).toBeDefined();
+});
+it("lets the user revert a pending invalid timecode", async () => {
+  const w = await setup();
+  await w.get("[data-test=trim-start]").setValue("bad");
+  const revert = w.get("[data-test=revert]");
+  expect(revert.attributes("disabled")).toBeUndefined();
+  await revert.trigger("click");
+  await flushPromises();
+  expect((w.get("[data-test=trim-start]").element as HTMLInputElement).value).toBe("00:00:00.000");
+  expect(w.find("[role=alert]").exists()).toBe(false);
+  expect(revert.attributes("disabled")).toBeDefined();
+});
+it("releases the preview toast suppression when the preview request fails", async () => {
+  mocks.preview.mockRejectedValue(new Error("nope"));
+  releases.length = 0;
+  const w = await setup();
+  await w.get("[data-test=preview-render]").trigger("click");
+  await flushPromises();
+  expect(releases).toHaveLength(1);
+  expect(releases[0]).toHaveBeenCalledTimes(1);
+  expect(w.get("[role=alert]").text()).toBe("nope");
+  w.unmount();
+  expect(releases[0]).toHaveBeenCalledTimes(1);
+});
+it("hides the raw file input behind a button", async () => {
+  mocks.get.mockResolvedValue(makeClip({ id: "a", needs_source: true, original: null }));
+  const w = await setup();
+  const input = w.get("input[type=file]");
+  expect(input.classes()).toContain("sr-only");
+  const click = vi.spyOn(input.element as HTMLInputElement, "click").mockImplementation(() => {});
+  await w.get("[data-test=replace-source]").trigger("click");
+  expect(click).toHaveBeenCalled();
 });

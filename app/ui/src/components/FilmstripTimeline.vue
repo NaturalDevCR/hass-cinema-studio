@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { api, filmstripUrl } from "@/api/client";
 import type { Recipe } from "@/api/types";
-import { snapTime, xToTime } from "@/lib/timeline";
+import { snapTime, timeToX, xToTime } from "@/lib/timeline";
 import { formatTimecode } from "@/lib/format";
 import { useI18n } from "@/i18n";
 const props = defineProps<{
@@ -86,10 +86,30 @@ watch(
   },
   { immediate: true },
 );
-const percent = (n: number) =>
-  props.duration > 0
-    ? Math.max(0, Math.min(100, (n / props.duration) * 100))
-    : 0;
+// Everything (bar, filmstrip, handles) shares one time scale: percent of the strip width.
+const percent = (n: number) => timeToX(n, props.duration, 100);
+const span = (seconds: number) =>
+  props.duration > 0 ? (seconds / props.duration) * 100 : 0;
+const trimEnd = computed(() => props.recipe.trim_end ?? props.duration);
+const trimRegion = computed(() => ({
+  left: percent(props.recipe.trim_start),
+  width: percent(trimEnd.value) - percent(props.recipe.trim_start),
+}));
+// Margins hug the trimmed region on the same scale, clipped at the clip edges.
+const leadBlock = computed(() => {
+  const right = percent(props.recipe.trim_start),
+    left = Math.max(0, right - span(props.recipe.lead_in));
+  return { left, width: right - left };
+});
+const tailBlock = computed(() => {
+  const left = percent(trimEnd.value),
+    right = Math.min(100, left + span(props.recipe.tail_out));
+  return { left, width: right - left };
+});
+const box = (b: { left: number; width: number }) => ({
+  left: b.left + '%',
+  width: b.width + '%',
+});
 function pointerTime(e: PointerEvent) {
   const box = strip.value!.getBoundingClientRect();
   return Math.min(
@@ -143,6 +163,15 @@ function key(e: KeyboardEvent, edge: "start" | "end") {
     ),
   );
 }
+/** Drops pending text (valid or not) and shows the recipe's trim again. */
+async function resync() {
+  await nextTick();
+  startText.value = formatTimecode(props.recipe.trim_start);
+  endText.value = formatTimecode(trimEnd.value);
+  invalidStart.value = false;
+  invalidEnd.value = false;
+}
+defineExpose({ resync });
 function input(e: Event, edge: "start" | "end") {
   const text = (e.target as HTMLInputElement).value.trim();
   if (edge === "start") startText.value = text;
@@ -157,36 +186,28 @@ function input(e: Event, edge: "start" | "end") {
 <template>
   <section class="space-y-3" :aria-label="t('clipEditor.timeline')">
     <p class="text-xs text-muted">{{ t("clipEditor.timeline") }}</p>
-    <div class="flex h-6 text-xs" aria-hidden="true">
-      <span :style="{ flexGrow: recipe.trim_start }" />
+    <div class="relative h-6 text-xs" aria-hidden="true">
       <span
-        class="overflow-hidden bg-black text-white"
-        :style="{ flexGrow: recipe.lead_in, flexBasis: 0 }"
+        data-test="lead-block"
+        class="absolute inset-y-0 overflow-hidden bg-black text-white"
+        :style="box(leadBlock)"
         >{{ recipe.lead_in }} s</span
       >
       <span
-        class="bg-accent/30"
-        :style="{
-          flexGrow: Math.max(
-            0,
-            (recipe.trim_end ?? duration) - recipe.trim_start,
-          ),
-          flexBasis: 0,
-        }"
+        data-test="trim-region"
+        class="absolute inset-y-0 bg-accent/30"
+        :style="box(trimRegion)"
       />
       <span
-        class="overflow-hidden bg-black text-white"
-        :style="{ flexGrow: recipe.tail_out, flexBasis: 0 }"
+        data-test="tail-block"
+        class="absolute inset-y-0 overflow-hidden bg-black text-white"
+        :style="box(tailBlock)"
         >{{ recipe.tail_out }} s</span
       >
-      <span
-        :style="{
-          flexGrow: Math.max(0, duration - (recipe.trim_end ?? duration)),
-        }"
-      />
     </div>
     <div
       ref="strip"
+      data-test="strip"
       class="relative h-24 touch-none rounded bg-ground"
       @pointerdown="emit('seek', pointerTime($event))"
       @pointermove="move"
@@ -219,7 +240,7 @@ function input(e: Event, edge: "start" | "end") {
       />
       <div
         class="absolute inset-y-0 right-0 bg-black/70"
-        :style="{ width: 100 - percent(recipe.trim_end ?? duration) + '%' }"
+        :style="{ width: 100 - percent(trimEnd) + '%' }"
       />
       <div
         class="absolute inset-y-0 w-0.5 bg-white pointer-events-none"

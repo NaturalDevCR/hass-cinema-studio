@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { ApiError, messageOf, ui } from "@/api/client";
 import type { Collection, NormalizationProfile, ProcessingProfile, Season } from "@/api/types";
 import AssetsPanel from "@/components/AssetsPanel.vue";
@@ -28,7 +29,24 @@ type Editor =
   | { kind: "loudness"; value?: NormalizationProfile }
   | { kind: "processing"; value?: ProcessingProfile };
 type Removable = Exclude<Tab, "assets">;
-const tab = ref<Tab>("collections");
+const route = useRoute();
+const router = useRouter();
+const asTab = (value: unknown): Tab | null => {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return tabs.find((key) => key === raw) ?? null;
+};
+// The tab lives in the route query (`?tab=assets`) so other views can deep-link into it.
+const tab = ref<Tab>(asTab(route.query.tab) ?? "collections");
+watch(
+  () => route.query.tab,
+  (value) => {
+    const next = asTab(value);
+    if (next) tab.value = next;
+  },
+);
+watch(tab, (value) => {
+  if (asTab(route.query.tab) !== value) void router.replace({ query: { ...route.query, tab: value } });
+});
 const editor = ref<Editor | null>(null);
 const formBusy = ref(false);
 const pending = ref(false);

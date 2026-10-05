@@ -23,11 +23,26 @@ let seq = 0;
 let run: Promise<void> | null = null;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
-function validation(file: File): string | null {
+export function validateUploadFile(file: File): string | null {
   if (!UPLOAD_EXTENSIONS.some((ext) => file.name.toLowerCase().endsWith(ext))) return translate("upload.unsupported");
   const limit = studio.state.value?.settings.max_upload_mb;
   if (limit !== undefined && file.size > limit * 1024 * 1024) return translate("upload.oversized", { n: limit });
   return file.size === 0 ? translate("upload.emptyFile") : null;
+}
+
+/**
+ * Streams `file` to the server in chunks and returns the upload id, ready to be completed
+ * (new clip) or attached (replace a clip's source). `onProgress` receives 0..1.
+ */
+export async function uploadChunks(file: File, onProgress: (fraction: number) => void = () => {}): Promise<string> {
+  const { upload_id, chunk_size } = await ui.uploads.create(file.name, file.size);
+  if (!Number.isInteger(chunk_size) || chunk_size <= 0) throw new Error(translate("error.invalidResponse"));
+  for (let offset = 0, index = 0; offset < file.size; offset += chunk_size, index++) {
+    const end = Math.min(offset + chunk_size, file.size);
+    await ui.uploads.chunk(upload_id, index, file.slice(offset, end));
+    onProgress(end / file.size);
+  }
+  return upload_id;
 }
 
 // Module state survives route changes. Only processing items need an extra clip poll:
@@ -82,7 +97,7 @@ watch(studio.clips, (clips) => {
 
 function add(files: FileList | File[]): void {
   for (const file of Array.from(files)) {
-    const error = validation(file);
+    const error = validateUploadFile(file);
     items.value.push({
       id: `upload-${++seq}-${Date.now().toString(36)}`,
       file,
@@ -97,7 +112,7 @@ function add(files: FileList | File[]): void {
 
 async function upload(item: UploadItem, body: UploadDefaults): Promise<void> {
   if (!items.value.includes(item)) return;
-  item.error = validation(item.file);
+  item.error = validateUploadFile(item.file);
   item.retryable = !item.error;
   if (item.error) {
     item.status = "error";
@@ -105,13 +120,7 @@ async function upload(item: UploadItem, body: UploadDefaults): Promise<void> {
   }
   item.status = "uploading";
   try {
-    const { upload_id, chunk_size } = await ui.uploads.create(item.file.name, item.file.size);
-    if (!Number.isInteger(chunk_size) || chunk_size <= 0) throw new Error(translate("error.invalidResponse"));
-    for (let offset = 0, index = 0; offset < item.file.size; offset += chunk_size, index++) {
-      const end = Math.min(offset + chunk_size, item.file.size);
-      await ui.uploads.chunk(upload_id, index, item.file.slice(offset, end));
-      item.progress = end / item.file.size;
-    }
+    const upload_id = await uploadChunks(item.file, (fraction) => (item.progress = fraction));
     const clip = await ui.uploads.complete(upload_id, body);
     item.clipId = clip.id;
     item.status = "processing";
@@ -148,7 +157,7 @@ function remove(id: string): void {
 function retry(id: string): void {
   const item = items.value.find((item) => item.id === id);
   if (item?.status !== "error" || item.clipId) return;
-  item.error = validation(item.file);
+  item.error = validateUploadFile(item.file);
   item.retryable = !item.error;
   if (!item.error) {
     item.status = "pending";

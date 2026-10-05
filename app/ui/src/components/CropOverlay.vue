@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { aspectLock, clampCrop, type Rect } from "@/lib/crop";
+import { aspectLock, clampCrop, displayFromCrop, type Rect } from "@/lib/crop";
 import { useI18n } from "@/i18n";
 const props = defineProps<{
   modelValue: Rect | null;
@@ -14,6 +14,19 @@ const host = ref<HTMLElement | null>(null);
 const rect = computed(
   () => props.modelValue ?? { x: 0, y: 0, w: props.width, h: props.height },
 );
+// Percent of the displayed frame, so the box tracks the video at any size.
+const shown = computed(() =>
+  displayFromCrop(rect.value, 100, 100, props.width, props.height),
+);
+const dims = computed(() => {
+  const r = shown.value;
+  return [
+    { top: 0, left: 0, width: 100, height: r.y },
+    { top: r.y + r.h, left: 0, width: 100, height: 100 - r.y - r.h },
+    { top: r.y, left: 0, width: r.x, height: r.h },
+    { top: r.y, left: r.x + r.w, width: 100 - r.x - r.w, height: r.h },
+  ];
+});
 const corners = ["nw", "ne", "sw", "se"] as const;
 let drag: {
   id: number;
@@ -106,12 +119,25 @@ function nudge(e: KeyboardEvent, corner: (typeof corners)[number]) {
     @lostpointercapture="end"
   >
     <div
+      v-for="(dim, index) in dims"
+      :key="index"
+      data-test="crop-dim"
+      class="pointer-events-none absolute bg-black/55"
+      :style="{
+        top: dim.top + '%',
+        left: dim.left + '%',
+        width: dim.width + '%',
+        height: dim.height + '%',
+      }"
+    />
+    <div
+      data-test="crop-box"
       class="absolute border-2 border-accent cursor-move"
       :style="{
-        left: (rect.x / width) * 100 + '%',
-        top: (rect.y / height) * 100 + '%',
-        width: (rect.w / width) * 100 + '%',
-        height: (rect.h / height) * 100 + '%',
+        left: shown.x + '%',
+        top: shown.y + '%',
+        width: shown.w + '%',
+        height: shown.h + '%',
       }"
       @pointerdown="start($event, null)"
     >

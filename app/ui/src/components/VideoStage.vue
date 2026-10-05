@@ -26,6 +26,11 @@ const video = ref<HTMLVideoElement | null>(null),
   error = ref(false);
 let frame = 0;
 const original = computed(() => props.source === "original");
+const ratio = computed(() =>
+  original.value && props.clip.original
+    ? { w: props.clip.original.width, h: props.clip.original.height }
+    : { w: 16, h: 9 },
+);
 const url = computed(() =>
   mediaUrl(
     props.clip.id,
@@ -38,14 +43,11 @@ const url = computed(() =>
   ),
 );
 watch(locked, (value) => {
-  if (!value || !props.clip.original) return;
+  // Locking only constrains later edits; with no crop there is nothing to snap,
+  // so the recipe stays untouched until the user actually changes the crop.
+  const r = props.recipe.crop;
+  if (!value || !props.clip.original || !r) return;
   const original = props.clip.original;
-  const r = props.recipe.crop ?? {
-    x: 0,
-    y: 0,
-    w: original.width,
-    h: original.height,
-  };
   const w = Math.min(r.w, (r.h * 16) / 9);
   emit(
     "crop",
@@ -82,15 +84,13 @@ async function toggle() {
     }
   } else v.pause();
 }
-function tick(schedule = true) {
+/** Fade simulation applies only while the original is actually playing. */
+function applyFade() {
   const v = video.value;
   if (!v) return;
   const [start, end] = bounds();
-  if (!v.paused && end > start && v.currentTime >= end) {
-    if (props.loop) v.currentTime = start;
-    else v.pause();
-  }
-  const fade = original.value
+  const live = original.value && !v.paused && !v.seeking;
+  const fade = live
     ? Math.max(
         0,
         Math.min(
@@ -102,6 +102,16 @@ function tick(schedule = true) {
     : 1;
   opacity.value = 1 - fade;
   v.volume = fade;
+}
+function tick(schedule = true) {
+  const v = video.value;
+  if (!v) return;
+  const [start, end] = bounds();
+  if (!v.paused && end > start && v.currentTime >= end) {
+    if (props.loop) v.currentTime = start;
+    else v.pause();
+  }
+  applyFade();
   emit("position", v.currentTime);
   if (schedule && !v.paused) frame = requestAnimationFrame(() => tick());
 }
@@ -118,8 +128,18 @@ function ended() {
 }
 function pause() {
   cancelAnimationFrame(frame);
+  applyFade();
   emit("playing", false);
 }
+watch(
+  () => [
+    props.fadeIn,
+    props.fadeOut,
+    props.recipe.trim_start,
+    props.recipe.trim_end,
+  ],
+  applyFade,
+);
 watch(url, () => {
   cancelAnimationFrame(frame);
   error.value = false;
@@ -133,12 +153,11 @@ defineExpose({ toggle, seek, jump });
 <template>
   <div class="space-y-3">
     <div
-      class="relative mx-auto bg-black"
+      data-test="stage-box"
+      class="relative mx-auto max-h-[70vh] bg-black"
       :style="{
-        aspectRatio:
-          original && clip.original
-            ? `${clip.original.width}/${clip.original.height}`
-            : '16/9',
+        aspectRatio: `${ratio.w} / ${ratio.h}`,
+        width: `min(100%, calc(70vh * ${ratio.w / ratio.h}))`,
       }"
     >
       <video
@@ -151,9 +170,12 @@ defineExpose({ toggle, seek, jump });
         @pause="pause"
         @ended="ended"
         @timeupdate="tick(false)"
+        @seeking="tick(false)"
+        @seeked="tick(false)"
         @error="error = true"
       />
       <div
+        data-test="fade-overlay"
         class="absolute inset-0 bg-black pointer-events-none"
         :style="{ opacity }"
       />

@@ -5,6 +5,7 @@ vi.mock("@/composables/useStudio", async (original) => {
 });
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createMemoryHistory, createRouter } from "vue-router";
 import OrganizeView from "./OrganizeView.vue";
 import { ApiError, ui } from "@/api/client";
 import { useConfirm } from "@/composables/useConfirm";
@@ -14,9 +15,11 @@ import { useI18n } from "@/i18n";
 import { makeCollection, makeNormProfile, makeSeason } from "@/test/factories";
 import { productionProfile } from "@/test/production-profile";
 
-const mountView = () => mount(OrganizeView, { attachTo: document.body });
+let router = createRouter({ history: createMemoryHistory(), routes: [] });
+const mountView = () => mount(OrganizeView, { attachTo: document.body, global: { plugins: [router] } });
 const wrappers: ReturnType<typeof mount>[] = [];
 beforeEach(() => {
+  router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/:rest(.*)*", component: OrganizeView }] });
   vi.mocked(useStudio().refresh).mockReset().mockResolvedValue(undefined);
   useI18n().setLocale("en");
   useToast().toasts.value = [];
@@ -158,4 +161,28 @@ it("renders the assets panel in the assets tab", async () => {
   const w = view();
   await w.get("#organize-tab-assets").trigger("click");
   expect(w.get("#organize-assets").text()).toContain("intro.mp4");
+});
+
+it("opens the tab named by the route query and keeps the query in sync", async () => {
+  await router.push("/organize?tab=assets");
+  const w = view();
+  await flushPromises();
+  expect(w.get("#organize-tab-assets").attributes("aria-selected")).toBe("true");
+  await w.get("#organize-tab-seasons").trigger("click");
+  await flushPromises();
+  expect(router.currentRoute.value.query.tab).toBe("seasons");
+  await router.push("/organize?tab=loudness");
+  await flushPromises();
+  expect(w.get("#organize-tab-loudness").attributes("aria-selected")).toBe("true");
+  await router.push("/organize?tab=bogus");
+  await flushPromises();
+  expect(w.get("#organize-tab-loudness").attributes("aria-selected")).toBe("true");
+});
+it("updates the query on keyboard tab navigation", async () => {
+  await router.push("/organize");
+  const w = view();
+  await flushPromises();
+  await w.get('[role="tablist"]').trigger("keydown", { key: "End" });
+  await flushPromises();
+  expect(router.currentRoute.value.query.tab).toBe("assets");
 });

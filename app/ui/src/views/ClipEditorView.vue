@@ -19,8 +19,8 @@ import { useClipEditor } from "@/composables/useClipEditor";
 import { useStudio } from "@/composables/useStudio";
 import { useJobs } from "@/composables/useJobs";
 import { useConfirm } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 import { useI18n } from "@/i18n";
-import { ui, messageOf } from "@/api/client";
 import type { MediaKind } from "@/api/types";
 import { UPLOAD_EXTENSIONS } from "@/composables/useUpload";
 import { trimmedLength } from "@/lib/recipe";
@@ -43,6 +43,8 @@ const {
   error,
   loading,
   previewVersion,
+  replacing,
+  uploadProgress,
 } = editor;
 const stage = ref<InstanceType<typeof VideoStage> | null>(null),
   position = ref(0),
@@ -50,9 +52,9 @@ const stage = ref<InstanceType<typeof VideoStage> | null>(null),
   loop = ref(false),
   source = ref<MediaKind>("original");
 const testOpen = ref(false),
-  invalidTrim = ref(false),
-  replacing = ref(false),
-  uploadProgress = ref(0);
+  invalidTrim = ref(false);
+const timeline = ref<InstanceType<typeof FilmstripTimeline> | null>(null),
+  fileInput = ref<HTMLInputElement | null>(null);
 const duration = computed(() => clip.value?.original?.duration ?? 0);
 const collection = computed(() =>
   studio.collectionById(details.value.collection_id),
@@ -111,7 +113,10 @@ watch(
   },
 );
 async function guard() {
-  if (saving.value || replacing.value) return false;
+  if (saving.value || replacing.value) {
+    useToast().push(t("clipEditor.busy"), "info");
+    return false;
+  }
   return (
     (!dirty.value && !invalidTrim.value) ||
     useConfirm().confirm({ title: t("clipEditor.discard") })
@@ -160,59 +165,21 @@ onBeforeUnmount(() => {
 async function replaceSource(e: Event) {
   const input = e.target as HTMLInputElement,
     file = input.files?.[0];
-  if (!file || replacing.value) return;
-  const id = props.id;
-  replacing.value = true;
-  error.value = null;
-  uploadProgress.value = 0;
-  try {
-    if (!UPLOAD_EXTENSIONS.some((ext) => file.name.toLowerCase().endsWith(ext)))
-      throw new Error(t("upload.unsupported"));
-    const max = studio.state.value?.settings.max_upload_mb;
-    if (!file.size) throw new Error(t("upload.emptyFile"));
-    if (max !== undefined && file.size > max * 1024 * 1024)
-      throw new Error(t("upload.oversized", { n: max }));
-    const { upload_id, chunk_size } = await ui.uploads.create(
-      file.name,
-      file.size,
-    );
-    if (!Number.isInteger(chunk_size) || chunk_size <= 0)
-      throw new Error(t("error.invalidResponse"));
-    for (
-      let offset = 0, index = 0;
-      offset < file.size;
-      offset += chunk_size, index++
-    ) {
-      const end = Math.min(file.size, offset + chunk_size);
-      await ui.uploads.chunk(upload_id, index, file.slice(offset, end));
-      uploadProgress.value = end / file.size;
-    }
-    const next = await ui.clips.replaceSource(id, upload_id);
-    clip.value = next;
-    recipe.value = {
-      ...next.recipe,
-      crop: next.recipe.crop ? { ...next.recipe.crop } : null,
-    };
-    details.value = {
-      title: next.title,
-      collection_id: next.collection_id,
-      enabled: next.enabled,
-      notes: next.notes,
-    };
-    previewReady.value = false;
-    source.value = "original";
-    await Promise.all([studio.refreshClips(), jobs.refresh()]);
-  } catch (cause) {
-    error.value = messageOf(cause);
-  } finally {
-    replacing.value = false;
-    input.value = "";
-  }
+  if (!file) return;
+  await editor.replaceSource(file);
+  source.value = "original";
+  input.value = "";
+}
+async function revert() {
+  editor.resetRecipe();
+  invalidTrim.value = false;
+  await timeline.value?.resync();
 }
 </script>
 <template>
   <Sheet
     :open="true"
+    wide
     :title="clip?.title ?? t('editor.title')"
     @close="router.push({ name: 'library' })"
   >
@@ -220,7 +187,7 @@ async function replaceSource(e: Event) {
     <p v-else-if="!clip">{{ t("clipEditor.notFound") }}</p>
     <div
       v-else
-      class="clip-editor-content grid gap-6 lg:grid-cols-2"
+      class="grid gap-6 lg:grid-cols-2"
       :inert="saving || replacing"
     >
       <div class="min-w-0 space-y-4">
@@ -263,6 +230,7 @@ async function replaceSource(e: Event) {
         />
         <FilmstripTimeline
           v-if="clip.original"
+          ref="timeline"
           :key="clip.original.sha256"
           :clip-id="id"
           :duration="duration"
@@ -309,10 +277,10 @@ async function replaceSource(e: Event) {
               {{ formatTimecode(clip.render.content_start) }} /
               {{ formatTimecode(clip.render.content_end) }}
             </dd>
-            <dt>LUFS</dt>
+            <dt>{{ t("clipEditor.lufs") }}</dt>
             <dd>{{ formatLufs(clip.render.integrated_lufs) }}</dd>
             <dt>{{ t("clipEditor.timing") }}</dt>
-            <dd>{{ clip.render.timing_source }}</dd>
+            <dd>{{ t(`clipEditor.timing.${clip.render.timing_source}`) }}</dd>
             <dt>{{ t("clipEditor.date") }}</dt>
             <dd>{{ formatDateTime(clip.render.published_at, locale) }}</dd>
           </dl>
@@ -323,17 +291,34 @@ async function replaceSource(e: Event) {
             <span>{{ job.kind }}</span
             ><progress class="w-full" :value="job.progress" max="1" />
           </div>
-          <RouterLink v-if="missingAssets" to="/organize" class="text-accent">{{
+          <RouterLink
+            v-if="missingAssets"
+            :to="{ path: '/organize', query: { tab: 'assets' } }"
+            class="text-accent"
+            >{{
             t("clipEditor.missing")
           }}</RouterLink>
-          <label v-if="clip.needs_source" class="btn block"
-            >{{ t("clipEditor.replace")
-            }}<input
+          <template v-if="clip.needs_source">
+            <button
+              type="button"
+              data-test="replace-source"
+              class="btn"
+              :disabled="replacing"
+              @click="fileInput?.click()"
+            >
+              {{ t("clipEditor.replace") }}
+            </button>
+            <input
+              ref="fileInput"
               type="file"
+              class="sr-only"
+              tabindex="-1"
+              :aria-label="t('clipEditor.replaceHint')"
               :accept="UPLOAD_EXTENSIONS.join(',')"
               :disabled="replacing"
               @change="replaceSource"
-          /></label>
+            />
+          </template>
           <progress v-if="replacing" :value="uploadProgress" max="1" />
           <p v-if="clip.error" role="alert" class="text-danger">
             {{ clip.error }}
@@ -420,8 +405,21 @@ async function replaceSource(e: Event) {
         >
         <label class="block"
           >{{ t("clipEditor.name")
-          }}<input v-model="details.title" class="field w-full"
-        /></label>
+          }}<input
+            v-model="details.title"
+            data-test="title"
+            class="field w-full"
+            :aria-invalid="!details.title?.trim()"
+            :aria-describedby="details.title?.trim() ? undefined : 'title-error'" /></label>
+        <p
+          v-if="!details.title?.trim()"
+          id="title-error"
+          data-test="title-error"
+          role="alert"
+          class="text-danger"
+        >
+          {{ t("clipEditor.titleRequired") }}
+        </p>
         <label class="block"
           ><input v-model="details.enabled" type="checkbox" />
           {{ t("clipEditor.enabled") }}</label
@@ -461,9 +459,10 @@ async function replaceSource(e: Event) {
           {{ t("clipEditor.save") }}
         </button>
         <button
+          data-test="revert"
           class="btn"
-          :disabled="!dirty || saving"
-          @click="editor.resetRecipe"
+          :disabled="(!dirty && !invalidTrim) || saving"
+          @click="revert"
         >
           {{ t("clipEditor.reset") }}
         </button>
@@ -478,8 +477,3 @@ async function replaceSource(e: Event) {
     @close="testOpen = false"
   />
 </template>
-<style>
-.sheet-root:has(.clip-editor-content) > .sheet-panel {
-  max-width: 80rem;
-}
-</style>

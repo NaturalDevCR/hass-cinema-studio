@@ -8,7 +8,7 @@ import { useI18n } from "@/i18n";
 // Full-screen on phones, right-hand drawer (max-w-2xl) from md up. The parent owns
 // `open`; Escape, the close button and the backdrop all just emit `close` so the
 // parent can run an unsaved-changes guard first.
-const props = defineProps<{ open: boolean; title: string }>();
+const props = defineProps<{ open: boolean; title: string; wide?: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 
 const { t } = useI18n();
@@ -29,7 +29,8 @@ useModal(toRef(props, "open"), panel, { onEscape: () => emit("close") });
           aria-modal="true"
           tabindex="-1"
           :aria-labelledby="titleId"
-          class="sheet-panel absolute inset-0 flex flex-col bg-surface outline-none md:left-auto md:w-full md:max-w-2xl md:border-l md:border-line md:shadow-2xl"
+          class="sheet-panel absolute inset-0 flex flex-col bg-surface outline-none md:left-auto md:w-full md:border-l md:border-line md:shadow-2xl"
+          :class="wide ? 'md:max-w-7xl' : 'md:max-w-2xl'"
         >
           <header
             class="flex shrink-0 items-center gap-2 border-b border-line py-2 pr-2 pl-4 pt-[max(0.5rem,env(safe-area-inset-top))]"

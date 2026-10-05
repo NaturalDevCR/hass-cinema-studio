@@ -5,6 +5,7 @@ import { defaultRecipe, recipesEqual, validateRecipe } from "@/lib/recipe";
 import { clone } from "@/lib/processing";
 import { useStudio } from "./useStudio";
 import { useJobs } from "./useJobs";
+import { uploadChunks, validateUploadFile } from "./useUpload";
 
 export function useClipEditor(clipId: Ref<string>) {
   const studio = useStudio(),
@@ -21,6 +22,8 @@ export function useClipEditor(clipId: Ref<string>) {
     previewPending = ref(false),
     previewVersion = ref("");
   const previewJob = ref<string | null>(null);
+  const replacing = ref(false),
+    uploadProgress = ref(0);
   let previewRecipe: Recipe | null = null,
     release: (() => void) | undefined,
     generation = 0;
@@ -69,8 +72,9 @@ export function useClipEditor(clipId: Ref<string>) {
         const next = await ui.clips.get(id);
         if (current === generation) {
           apply(next);
+          // `has_preview` only says some preview exists on the server, not that it matches
+          // this recipe, so it stays unknown until a preview is rendered in this session.
           previewRecipe = clone(next.recipe);
-          previewReady.value = next.has_preview;
         }
       } catch (cause) {
         if (current === generation) error.value = messageOf(cause);
@@ -170,7 +174,32 @@ export function useClipEditor(clipId: Ref<string>) {
         error.value = messageOf(cause);
         previewPending.value = false;
         release?.();
+        release = undefined;
       }
+    }
+  }
+  /** Uploads a replacement source (chunked, like a new upload) and adopts the repaired clip. */
+  async function replaceSource(file: File) {
+    if (replacing.value || !clip.value) return;
+    const id = clipId.value,
+      current = generation;
+    replacing.value = true;
+    error.value = null;
+    uploadProgress.value = 0;
+    try {
+      const invalid = validateUploadFile(file);
+      if (invalid) throw new Error(invalid);
+      const uploadId = await uploadChunks(file, (n) => (uploadProgress.value = n));
+      const next = await ui.clips.replaceSource(id, uploadId);
+      if (current === generation) {
+        apply(next);
+        previewReady.value = false;
+        await Promise.all([studio.refreshClips(), jobs.refresh()]);
+      }
+    } catch (cause) {
+      if (current === generation) error.value = messageOf(cause);
+    } finally {
+      replacing.value = false;
     }
   }
   function resetRecipe() {
@@ -190,6 +219,9 @@ export function useClipEditor(clipId: Ref<string>) {
     save,
     previewRender,
     resetRecipe,
+    replaceSource,
+    replacing,
+    uploadProgress,
     previewReady,
     previewPending,
     previewVersion,
