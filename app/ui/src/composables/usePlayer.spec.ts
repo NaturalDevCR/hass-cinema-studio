@@ -29,7 +29,7 @@ describe("usePlayer", () => {
     expect(video.muted).toBe(false);
     expect(video.autoplay).toBe(false);
     expect(video.preload).toBe("none");
-    expect(video.controls).toBe(false);
+    expect(video.controls).toBe(true);
     expect(video.playsInline).toBe(true);
     expect(play).not.toHaveBeenCalled();
   });

@@ -52,6 +52,7 @@ def create_app(
     *,
     supervisor: SupervisorClient | None = None,
     start_background: bool = True,
+    encoder_threads: int = 0,
 ) -> FastAPI:
     """Build the Studio app.
 
@@ -84,7 +85,9 @@ def create_app(
         gc = _RecordingCollector(
             paths, repo, fence, store, on_result=lambda result: _record_gc(app, result)
         )
-        engine = RenderEngine(FfmpegCommandBuilder(), timeout_for=render_timeout)
+        engine = RenderEngine(
+            FfmpegCommandBuilder(encoder_threads=encoder_threads), timeout_for=render_timeout
+        )
         state = app.state
         state.discovery_lock = asyncio.Lock()
         state.source_locks = WeakValueDictionary[str, asyncio.Lock]()

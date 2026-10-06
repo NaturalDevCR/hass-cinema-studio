@@ -201,7 +201,8 @@ async def test_upload_flow_probes_renders_and_creates_thumbnails(
     assert (thumbs / "original" / "0000.jpg").is_file()
     assert (thumbs / "r1" / "poster.jpg").is_file()
     assert clip.has_thumbs
-    assert [j.kind for j in reversed(queue.list_jobs())] == ["probe", "render", "thumbs"]
+    # The original's filmstrip comes before the render; the render poster after it.
+    assert [j.kind for j in reversed(queue.list_jobs())] == ["probe", "thumbs", "render", "thumbs"]
     assert not any(path.is_dir() and path.name != "previews" for path in paths.work_dir.iterdir())
 
 
@@ -493,7 +494,11 @@ async def test_unexpected_errors_are_truncated_and_do_not_kill_the_worker(
     with caplog.at_level(logging.ERROR, logger="cinema_studio.jobs"):
         failed = queue.enqueue_render(clip.id)
         await queue.wait_idle()
-    assert failed.status == "failed" and failed.error == "x" * 396 + "tail"
+    assert failed.status == "failed" and len(failed.error) <= 400
+    # The headline survives truncation, and so does the end.
+    assert failed.error.startswith("x" * 150 + "\n…\n") and failed.error.endswith(
+        "x" * 100 + "tail"
+    )
     assert "Job" in caplog.text
     monkeypatch.undo()
     retry = queue.enqueue_render(clip.id)
@@ -716,6 +721,25 @@ async def test_start_recovers_interrupted_work(repo, store, engine, paths, make_
         assert not failed.has_preview
     finally:
         await jobs.stop()
+
+
+async def test_start_requeues_pending_renders_and_missing_thumbnails_but_not_failures(
+    queue, repo, store, engine, paths, make_video
+):
+    ready, failed, interrupted = [
+        (await uploaded(queue, repo, store, make_video, name=f"{name}.mp4")).id
+        for name in ("ready", "failed", "interrupted")
+    ]
+    for clip_id in (ready, failed, interrupted):
+        repo.set_flags(clip_id, render_pending=True)
+    repo.set_flags(ready, has_thumbs=False)
+    repo.set_status(failed, "failed", "true peak above ceiling")
+    repo.set_status(interrupted, "failed", "interrupted")
+    restarted = make_queue(repo, store, engine, paths)
+    restarted._recover()
+    jobs = [(j.kind, j.clip_id) for j in restarted.list_jobs()]
+    # Thumbnails first; a render that failed by itself waits for the user.
+    assert jobs == [("thumbs", ready), ("render", ready), ("render", interrupted)]
 
 
 async def test_stop_settles_the_running_job_and_restores_the_clip(

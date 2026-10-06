@@ -2,3 +2,6 @@ configuration:
   log_level:
     name: Log level
     description: Controls how much detail the App writes to its log.
+  encoder_threads:
+    name: Encoder threads
+    description: "Video encoder threads per render. Fewer threads use less memory (4K needs roughly 0.3 GB per thread) but render slower; 0 lets the encoder decide."

@@ -141,3 +141,52 @@ def test_peak_correction_follows_normalization_and_precedes_limiter(tmp_path):
     p = replace(p, peak_reduction_db=0.59)
     g = graph(p)
     assert g.rindex("loudnorm=") < g.index("volume=-0.59dB") < g.rindex("alimiter=")
+
+
+def _inputs(argv):
+    """(input options, path) for every ``-i``, in input-index order."""
+    found, options = [], []
+    for index, item in enumerate(argv):
+        if item == "-i":
+            found.append((tuple(options), argv[index + 1]))
+            options = []
+        elif item in ("-an", "-vn", "-sn", "-dn"):
+            options.append(item)
+    return found
+
+
+def test_each_segment_has_separate_video_and_audio_demuxers(tmp_path):
+    p = plan(
+        tmp_path,
+        intro=tmp_path / "intro.mp4",
+        outro=tmp_path / "outro.mp4",
+        intro_duration=4,
+        outro_duration=3,
+        outro_has_audio=False,
+        profile=ProcessingProfile.model_validate(
+            {"audio": {"missing_policy": {"mode": "silence"}}}
+        ),
+    )
+    argv = FfmpegCommandBuilder().build(p, None)
+    video_only, audio_only = ("-an", "-sn", "-dn"), ("-vn", "-sn", "-dn")
+    assert _inputs(argv) == [
+        (video_only, str(p.source)),
+        (audio_only, str(p.source)),
+        (video_only, str(p.intro)),
+        (audio_only, str(p.intro)),
+        (video_only, str(p.outro)),  # no audio stream: silence instead of a demuxer
+    ]
+    g = graph(p)
+    assert "[0:v]trim=" in g and "[1:a]atrim=" in g
+    assert "[2:v]setpts" in g and "[3:a]asetpts" in g
+    assert "[4:v]setpts" in g and "[4:a]" not in g and "[5:" not in g
+    assert "anullsrc=" in g
+
+
+def test_encoder_threads_are_output_scoped_and_optional(tmp_path):
+    p = plan(tmp_path)
+    argv = FfmpegCommandBuilder(encoder_threads=4).build(p, None)
+    assert argv[argv.index("-threads:v") + 1] == "4"
+    assert argv.index("-threads:v") > argv.index("-c:v") > argv.index("-filter_complex")
+    assert "-threads:v" not in FfmpegCommandBuilder().build(p, None)
+    assert "-threads:v" not in FfmpegCommandBuilder(encoder_threads=-1).build(p, None)

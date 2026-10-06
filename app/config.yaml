@@ -1,5 +1,5 @@
 name: Cinema Studio
-version: 0.1.0
+version: 0.1.1
 slug: cinema_studio
 description: Import, edit, render and organize cinema clips for Home Assistant
 url: https://github.com/NaturalDevCR/hass-cinema-studio
@@ -20,5 +20,7 @@ map:
   - media:rw
 options:
   log_level: info
+  encoder_threads: 4
 schema:
   log_level: list(debug|info|warning|error)
+  encoder_threads: int(0,64)

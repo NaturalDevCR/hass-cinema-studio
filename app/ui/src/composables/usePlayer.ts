@@ -14,7 +14,7 @@ function reset(): void {
 /**
  * The one video element behind every inline card preview. Starting a clip always silences the
  * previous one, and the element is sound-on: playback only ever starts from a tap, never
- * as muted autoplay.
+ * as muted autoplay. It covers the card's preview area and shows native controls.
  */
 function element(): HTMLVideoElement {
   if (!video) {
@@ -22,9 +22,15 @@ function element(): HTMLVideoElement {
     video.preload = "none";
     video.muted = false;
     video.autoplay = false;
-    video.controls = false;
+    // Native controls give seeking, volume and fullscreen; the card overlays the element.
+    video.controls = true;
     video.playsInline = true;
+    video.className = "absolute inset-0 size-full bg-black object-contain";
     video.addEventListener("ended", reset);
+    // Native controls can resume playback without going through toggle().
+    video.addEventListener("play", () => {
+      if (currentId.value) playing.value = true;
+    });
     // External pauses (media keys, an incoming call). Ignore the late event our own
     // pause() queues when we switch clips: by then play() has made `paused` false again.
     video.addEventListener("pause", () => {

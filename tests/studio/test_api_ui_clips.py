@@ -906,12 +906,13 @@ async def test_jobs_list_running_then_queued_then_finished(
         assert (await idle.post(f"/api/ui/clips/{clip_id}/rerender")).status_code == 200
     thumbs = app.state.jobs.enqueue_thumbs(first)
     jobs = (await idle.get("/api/ui/jobs")).json()
+    # Cheap thumbnail jobs jump ahead of queued renders.
     assert [(j["kind"], j["clip_id"], j["status"]) for j in jobs] == [
+        ("thumbs", first, "queued"),
         ("render", first, "queued"),
         ("render", second, "queued"),
-        ("thumbs", first, "queued"),
     ]
-    assert jobs[2]["id"] == thumbs.id
+    assert jobs[0]["id"] == thumbs.id
     assert {"id", "kind", "clip_id", "clip_title", "status", "progress", "error"} <= set(jobs[0])
 
 

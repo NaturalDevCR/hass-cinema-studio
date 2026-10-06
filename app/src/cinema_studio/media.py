@@ -8,14 +8,38 @@ import json
 import math
 import os
 import re
+import signal
 import tempfile
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import cast
 
 
 class MediaError(Exception):
     """A media tool failed or returned unusable data."""
+
+
+def _exit_summary(executable: str, returncode: int | None) -> str:
+    """Name how a media process ended; a SIGKILL nobody sent is most often the OOM killer."""
+    if returncode is not None and returncode < 0:
+        try:
+            name = signal.Signals(-returncode).name
+        except ValueError:
+            name = f"signal {-returncode}"
+        if returncode == -signal.SIGKILL:
+            return f"{executable} was killed by {name} (possibly out of memory)"
+        return f"{executable} was killed by {name}"
+    return f"{executable} exited with code {returncode}"
+
+
+def _prefer_oom_kill(pid: int) -> None:
+    """Under memory pressure the kernel should kill this media process, not Home Assistant.
+
+    Raising a child's own OOM score needs no privileges; it is best effort everywhere else.
+    """
+    with suppress(OSError):
+        Path(f"/proc/{pid}/oom_score_adj").write_text("1000")
 
 
 async def run_process(
@@ -34,6 +58,7 @@ async def run_process(
     except OSError as exc:
         raise MediaError(str(exc)[-1000:]) from exc
     assert process.stdout is not None and process.stderr is not None
+    _prefer_oom_kill(process.pid)
 
     async def stdout_reader() -> bytes:
         assert process.stdout is not None
@@ -71,7 +96,10 @@ async def run_process(
             ) from exc
         raise
     if process.returncode != 0:
-        raise MediaError(stderr.decode(errors="replace")[-1000:])
+        raise MediaError(
+            f"{_exit_summary(Path(argv[0]).name, process.returncode)}\n"
+            + stderr.decode(errors="replace")[-1000:]
+        )
     return stdout, stderr
 
 

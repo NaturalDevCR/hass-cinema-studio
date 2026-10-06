@@ -83,8 +83,10 @@ def effective_profile(plan: RenderPlan) -> ProcessingProfile:
 class FfmpegCommandBuilder:
     """Build argv vectors; no probes, shell, or caller-provided raw filters."""
 
-    def __init__(self, executable: str = "ffmpeg") -> None:
+    def __init__(self, executable: str = "ffmpeg", *, encoder_threads: int = 0) -> None:
         self.executable = executable
+        # 0 lets the encoder pick; a 4K libx264 encoder's memory grows with its thread count.
+        self.encoder_threads = max(0, encoder_threads)
 
     @staticmethod
     def _video_filter(profile: ProcessingProfile) -> str:
@@ -158,8 +160,19 @@ class FfmpegCommandBuilder:
                     raise ValueError(f"{name} duration must be probed before building")
                 inputs.append((name, path, length, audio, stats))
         graph: list[str] = []
-        for index, (name, path, length, has_audio, stats) in enumerate(inputs):
-            command += ["-i", str(path)]
+        # Each segment is opened twice, video-only and audio-only: with one demuxer per file,
+        # demand for a segment's audio (acrossfade, apad) also decodes its video, and those 4K
+        # frames pile up in front of xfade until the transition (gigabytes of memory).
+        next_input = 0
+        for name, path, length, has_audio, stats in inputs:
+            video_index = next_input
+            command += ["-an", "-sn", "-dn", "-i", str(path)]
+            next_input += 1
+            audio_index = None
+            if has_audio:
+                audio_index = next_input
+                command += ["-vn", "-sn", "-dn", "-i", str(path)]
+                next_input += 1
             vf = "setpts=PTS-STARTPTS,"
             af = "asetpts=PTS-STARTPTS,"
             if name == "clip":
@@ -213,7 +226,7 @@ class FfmpegCommandBuilder:
                 f",aresample={profile.audio.sample_rate},"
                 f"asettb=1/{profile.audio.sample_rate},asetpts=N/SR/TB"
             )
-            graph.append(f"[{index}:v]{vf}[v_{name}]")
+            graph.append(f"[{video_index}:v]{vf}[v_{name}]")
             if not has_audio:
                 if profile.audio.missing_policy.mode != "silence":
                     raise ValueError(f"{name} audio is required by this processing profile")
@@ -224,7 +237,7 @@ class FfmpegCommandBuilder:
                     f"{af}[a_{name}]"
                 )
             else:
-                graph.append(f"[{index}:a]{af}[a_{name}]")
+                graph.append(f"[{audio_index}:a]{af}[a_{name}]")
         video_label, audio_label = "v_clip", "a_clip"
         total_duration = duration
         for name, path, length in (
@@ -314,6 +327,7 @@ class FfmpegCommandBuilder:
             str(profile.video.fps),
             "-c:v",
             profile.video.codec,
+            *(["-threads:v", str(self.encoder_threads)] if self.encoder_threads > 0 else []),
             "-preset",
             profile.video.preset,
             "-profile:v",

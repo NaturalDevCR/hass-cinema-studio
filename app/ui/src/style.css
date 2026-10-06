@@ -60,6 +60,12 @@
   @media (pointer: fine) and (min-width: 48rem) {
     min-height: 2.5rem;
   }
+  /* Toggle buttons (source tabs, loop) show their pressed state. */
+  &[aria-pressed="true"] {
+    border-color: var(--color-accent);
+    background-color: var(--color-accent-soft);
+    color: var(--color-ink);
+  }
 }
 
 @utility btn-primary {

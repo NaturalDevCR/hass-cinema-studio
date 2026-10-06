@@ -8,7 +8,7 @@ RUN npm ci
 COPY ui/ ./
 RUN npm run build
 
-FROM ghcr.io/home-assistant/${BUILD_ARCH}-base-python:3.13-alpine3.22
+FROM ghcr.io/home-assistant/${BUILD_ARCH}-base-python:3.13-alpine3.24
 
 RUN apk add --no-cache ffmpeg \
     && pip install --no-cache-dir \

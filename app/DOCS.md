@@ -38,13 +38,18 @@ Cleanup runs under an exclusive lock on `.gc.lock`. It stops without deleting an
 
 Home Assistant App backups include the Cinema Studio database, thumbnails and token in the App's data. Renders and originals live in `/media/cinema-studio`, outside App backups. Back up the `/media` share separately (for example with a media backup location or a manual copy) if you need to keep them. After restoring only the App data, re-render the clips that are missing their files.
 
+## Options
+
+- `encoder_threads` (default `4`): video encoder threads per render. A 4K render needs roughly 0.3 GB of memory per thread on top of about 1.5 GB for decoding and transitions, so keep it low on small hosts; more threads render faster. `0` lets the encoder decide (one thread per CPU core, which can use several GB).
+
 ## Troubleshooting
 
 - If the panel does not load, check the App log and confirm the App is running.
 - If the integration cannot connect, confirm it uses the App hostname shown on the App's Supervisor page, port `8099`, and the current token.
 - If a clip does not play, confirm it has a finished render and that `/media` is available to Home Assistant.
 - If an upload or import is missing, check the Jobs tray for an error and that the video format is supported.
+- If a render fails with "killed by SIGKILL (possibly out of memory)", lower `encoder_threads` or give the host more memory. A failed render keeps the clip's previous published render; retry it from the clip editor.
 
 ## Español
 
-Cinema Studio permite importar, editar, renderizar y organizar clips de cine para Home Assistant. Abra el panel **Cinema Studio**, cree colecciones y temporadas, y luego cargue o importe sus videos. Instale la integración Cinema Studio desde HACS; se conecta automáticamente con la aplicación. Para traer sus clips de Cinema Collections, ejecute la acción `cinema_studio.import_legacy`. Los renders se guardan en `/media/cinema-studio`, fuera de las copias de seguridad de la aplicación, por lo que debe respaldar `/media` por separado.
+Cinema Studio permite importar, editar, renderizar y organizar clips de cine para Home Assistant. Abra el panel **Cinema Studio**, cree colecciones y temporadas, y luego cargue o importe sus videos. Instale la integración Cinema Studio desde HACS; se conecta automáticamente con la aplicación. Para traer sus clips de Cinema Collections, ejecute la acción `cinema_studio.import_legacy`. Los renders se guardan en `/media/cinema-studio`, fuera de las copias de seguridad de la aplicación, por lo que debe respaldar `/media` por separado. La opción `encoder_threads` (predeterminado `4`) limita los hilos del codificador por render: menos hilos usan menos memoria (cerca de 0,3 GB por hilo en 4K) pero renderizan más lento.

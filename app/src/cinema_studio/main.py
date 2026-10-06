@@ -40,15 +40,26 @@ def uvicorn_options(log_level: str) -> dict[str, Any]:
     }
 
 
+def resolve_encoder_threads(options: dict[str, object]) -> int:
+    """The ``encoder_threads`` option in 0..64 (0 = encoder default); 4 when unset or invalid."""
+    value = options.get("encoder_threads", 4)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 4
+    return min(max(value, 0), 64)
+
+
 def main() -> None:
-    log_level = resolve_log_level(load_options(OPTIONS_PATH))
+    options = load_options(OPTIONS_PATH)
+    log_level = resolve_log_level(options)
     logging.basicConfig(
         level=log_level.upper(), format="%(asctime)s %(levelname)s [%(name)s] %(message)s"
     )
     # httpx logs every request at INFO, which would echo each Supervisor call.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     app = create_app(
-        Paths.from_env(), supervisor=SupervisorClient(os.environ.get("SUPERVISOR_TOKEN"))
+        Paths.from_env(),
+        supervisor=SupervisorClient(os.environ.get("SUPERVISOR_TOKEN")),
+        encoder_threads=resolve_encoder_threads(options),
     )
     uvicorn.run(app, **uvicorn_options(log_level))
 

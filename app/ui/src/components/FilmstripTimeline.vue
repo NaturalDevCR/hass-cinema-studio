@@ -208,7 +208,7 @@ function input(e: Event, edge: "start" | "end") {
     <div
       ref="strip"
       data-test="strip"
-      class="relative h-24 touch-none rounded bg-ground"
+      class="relative h-24 touch-none cursor-pointer rounded-md bg-ground"
       @pointerdown="emit('seek', pointerTime($event))"
       @pointermove="move"
       @pointerup="dragging = null"
@@ -243,13 +243,26 @@ function input(e: Event, edge: "start" | "end") {
         :style="{ width: 100 - percent(trimEnd) + '%' }"
       />
       <div
+        class="pointer-events-none absolute inset-y-0 border-y-2 border-accent"
+        aria-hidden="true"
+        :style="{
+          left: percent(recipe.trim_start) + '%',
+          width: percent(trimEnd) - percent(recipe.trim_start) + '%',
+        }"
+      />
+      <div
         class="absolute inset-y-0 w-0.5 bg-white pointer-events-none"
         :style="{ left: percent(position) + '%' }"
       />
       <button
         v-for="edge in ['start', 'end'] as const"
         :key="edge"
-        class="absolute inset-y-0 w-6 -translate-x-1/2 border-2 border-accent bg-accent/30"
+        class="absolute inset-y-0 z-10 grid w-5 cursor-ew-resize place-items-center bg-accent text-accent-ink"
+        :class="
+          edge === 'start'
+            ? 'rounded-l-md'
+            : '-translate-x-full rounded-r-md'
+        "
         role="slider"
         :aria-label="
           t(edge === 'start' ? 'clipEditor.trimStart' : 'clipEditor.trimEnd')
@@ -269,7 +282,9 @@ function input(e: Event, edge: "start" | "end") {
         }"
         @pointerdown="start($event, edge)"
         @keydown="key($event, edge)"
-      />
+      >
+        <span class="h-8 w-0.5 rounded bg-black/40" aria-hidden="true" />
+      </button>
     </div>
     <p v-if="failed" class="text-xs text-muted">
       {{ t("clipEditor.filmstripError") }}

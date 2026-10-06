@@ -153,3 +153,19 @@ async def test_poster_rejects_non_jpeg_and_preserves_previous(tmp_path, monkeypa
         await make_poster(tmp_path / "src.mp4", dst, 0)
     assert dst.read_bytes() == b"previous poster"
     assert sorted(tmp_path.glob("*.jpg")) == [dst]
+
+
+async def test_failed_process_names_its_exit_before_stderr():
+    import sys
+
+    from cinema_studio.media import run_process
+
+    code = "import sys; sys.stderr.write('last words'); sys.exit(3)"
+    with pytest.raises(MediaError) as failed:
+        await run_process([sys.executable, "-c", code])
+    name = sys.executable.rsplit("/", 1)[-1]
+    assert str(failed.value).startswith(f"{name} exited with code 3\n")
+    assert str(failed.value).endswith("last words")
+    kill = "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
+    with pytest.raises(MediaError, match="killed by SIGKILL \\(possibly out of memory\\)"):
+        await run_process([sys.executable, "-c", kill])

@@ -14,7 +14,7 @@ APP = ROOT / "app"
 
 def test_dockerfile_uses_local_context_and_pinned_runtime() -> None:
     dockerfile = (APP / "Dockerfile").read_text()
-    assert "ghcr.io/home-assistant/${BUILD_ARCH}-base-python:3.13-alpine3.22" in dockerfile
+    assert "ghcr.io/home-assistant/${BUILD_ARCH}-base-python:3.13-alpine3.24" in dockerfile
     assert "COPY src " in dockerfile
     assert "COPY rootfs /" in dockerfile
     for pin in (
@@ -81,4 +81,4 @@ def test_docs_and_changelog_cover_required_topics() -> None:
     docs = (APP / "DOCS.md").read_text()
     for topic in ("cinema_studio.import_legacy", "/media", "8099", "Backups"):
         assert topic in docs
-    assert (APP / "CHANGELOG.md").read_text().startswith("## 0.1.0")
+    assert (APP / "CHANGELOG.md").read_text().startswith("## 0.1.1")

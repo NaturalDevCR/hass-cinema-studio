@@ -2,3 +2,6 @@ configuration:
   log_level:
     name: Nivel de registro
     description: Controla el nivel de detalle que la aplicación escribe en el registro.
+  encoder_threads:
+    name: Hilos del codificador
+    description: "Hilos del codificador de video por render. Menos hilos usan menos memoria (4K necesita cerca de 0,3 GB por hilo) pero renderizan más lento; 0 deja que el codificador decida."

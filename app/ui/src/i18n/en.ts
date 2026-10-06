@@ -109,6 +109,7 @@ export const en = {
   "library.upload": "Upload clips",
   "library.import": "Import from Cinema Collections",
   "library.play": "Preview {title}",
+  "library.stop": "Close preview of {title}",
   "library.select": "Select {title}",
   "library.pending": "Render pending",
   "library.needsSource": "Source needed",

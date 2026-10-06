@@ -264,7 +264,7 @@ async def test_probed_output_validation_failure(make_video, small_profile_settin
             return argv
 
     p = make_plan(make_video(seconds=2), tmp_path, small_profile_settings, preview=True)
-    with pytest.raises(MediaError, match="dimensions"):
+    with pytest.raises(MediaError, match="output is 160x90, expected 320x180"):
         await engine(WrongSize()).render(p)
     assert not p.output.exists()
 

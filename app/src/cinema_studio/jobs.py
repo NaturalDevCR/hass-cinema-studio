@@ -59,6 +59,15 @@ _FILMSTRIP_MARKER = ".sha256"
 _ASSET_ROLES = ("intro", "outro")
 
 
+def _clip_error(error: str) -> str:
+    """Bound an error, keeping its first line (the cause) and the end (ffmpeg's last words)."""
+    error = error.replace("\r", "\n")
+    if len(error) <= _ERROR_LENGTH:
+        return error
+    head = error.splitlines()[0][:150] if error.strip() else ""
+    return f"{head}\n…\n{error[-(_ERROR_LENGTH - len(head) - 3) :]}"
+
+
 def render_timeout(seconds: float, per_minute: int = 120, minimum: float = 300.0) -> float:
     """Timeout of a render of ``seconds`` of media: ``max(300, 120 * minutes)``."""
     return max(minimum, per_minute * seconds / 60)
@@ -191,7 +200,18 @@ class JobQueue:
         for clip in self._repo.list_clips():
             if clip.has_preview and not self._preview_path(clip.id).is_file():
                 self._repo.set_flags(clip.id, has_preview=False)
-            if clip.status != "processing" or clip.needs_source or clip.id in queued:
+            if clip.needs_source:
+                continue
+            if clip.status != "processing":
+                # The queue lives in memory: pending work a restart dropped is queued again. A
+                # render that failed on its own is not retried at every start (only by the user);
+                # one a restart interrupted is.
+                if clip.render_pending and (clip.status != "failed" or clip.error == "interrupted"):
+                    self.enqueue_render(clip.id)
+                if clip.original is not None and not clip.has_thumbs:
+                    self.enqueue_thumbs(clip.id)
+                continue
+            if clip.id in queued:
                 continue
             try:
                 present = self._original_path(clip).is_file()
@@ -242,7 +262,20 @@ class JobQueue:
             clip_title=clip.title,
             created_at=utcnow_iso(),
         )
-        self._queued.append(_Entry(job, recipe))
+        entry = _Entry(job, recipe)
+        if kind == "thumbs":
+            # Thumbnails take seconds; they must not wait behind a backlog of 4K renders.
+            position = next(
+                (
+                    index
+                    for index, queued in enumerate(self._queued)
+                    if queued.job.kind in ("render", "preview")
+                ),
+                len(self._queued),
+            )
+            self._queued.insert(position, entry)
+        else:
+            self._queued.append(entry)
         self._idle.clear()
         self._available.set()
         return job
@@ -317,7 +350,7 @@ class JobQueue:
         """Settle failure; return True when a displaced probe was superseded instead."""
         job = entry.job
         job.status = "failed"
-        job.error = error[-_ERROR_LENGTH:]
+        job.error = _clip_error(error)
         if not entry.touched or job.clip_id is None:
             return False
         try:

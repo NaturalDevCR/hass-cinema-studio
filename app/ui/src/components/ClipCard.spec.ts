@@ -103,6 +103,17 @@ describe("ClipCard", () => {
       expect(video).toBe(usePlayer().element());
       expect(video?.getAttribute("src")).toContain("film");
       expect(usePlayer().currentId.value).toBe("film");
+      expect(video?.controls).toBe(true);
+      expect(wrapper.find('[data-test="play"]').exists()).toBe(false);
+      await wrapper.get('[data-test="close-preview"]').trigger("click");
+      expect(usePlayer().currentId.value).toBeNull();
+      expect(wrapper.element.querySelector("video")).toBeNull();
+    });
+
+    it("opens the editor from the poster area", async () => {
+      const wrapper = card();
+      await wrapper.get(".aspect-video").trigger("click");
+      expect(wrapper.emitted("open")?.[0]).toEqual(["film"]);
     });
   });
 });

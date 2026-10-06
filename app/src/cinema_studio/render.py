@@ -53,23 +53,31 @@ def recipe_hash(recipe: Recipe, normalization: NormalizationProfile | None) -> s
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
+def output_problem(info: MediaProbe, profile: ProcessingProfile) -> str | None:
+    """Why a compiled output does not match its profile, or None when it does."""
+    if not info.valid or info.duration <= 0:
+        return "output is not a readable video"
+    if info.width != profile.video.width or info.height != profile.video.height:
+        return (
+            f"output is {info.width}x{info.height}, expected "
+            f"{profile.video.width}x{profile.video.height}"
+        )
+    if info.fps is None or abs(info.fps - profile.video.fps) >= 0.05:
+        return f"output frame rate is {info.fps}, expected {profile.video.fps}"
+    if not info.has_audio:
+        return "output has no audio stream"
+    if info.video_duration is not None and info.audio_duration is not None:
+        drift = abs(info.video_duration - info.audio_duration)
+        if drift > max(0.1, 1 / profile.video.fps):
+            return (
+                f"audio/video length mismatch: video {info.video_duration:.3f} s, "
+                f"audio {info.audio_duration:.3f} s"
+            )
+    return None
+
+
 def valid_output(info: MediaProbe, profile: ProcessingProfile) -> bool:
-    valid_streams = bool(
-        info.valid
-        and info.duration > 0
-        and info.width == profile.video.width
-        and info.height == profile.video.height
-        and info.fps is not None
-        and abs(info.fps - profile.video.fps) < 0.05
-        and info.has_audio
-    )
-    if not valid_streams:
-        return False
-    return not (
-        info.video_duration is not None
-        and info.audio_duration is not None
-        and abs(info.video_duration - info.audio_duration) > max(0.1, 1 / profile.video.fps)
-    )
+    return output_problem(info, profile) is None
 
 
 def compiled_timing(plan: RenderPlan, info: MediaProbe) -> Timing:
@@ -109,7 +117,6 @@ class RenderEngine:
         self, plan: RenderPlan, on_progress: Callable[[float], None] | None = None
     ) -> RenderOutput:
         temporary: Path | None = None
-        stderr_tail = ""
         output_is_safe = False
         try:
             if any(
@@ -211,10 +218,9 @@ class RenderEngine:
                     recipe=plan.recipe.model_copy(update={"gain_db": 0.0}),
                     final_loudness=None,
                 )
-                _, stderr = await run_process(
+                await run_process(
                     self.builder.build(mix_plan, measured), timeout=timeout, on_line=progress
                 )
-                stderr_tail = stderr.decode(errors="replace")[-1000:]
                 mix_probe = await probe(temporary)
                 mix_timing = compiled_timing(mix_plan, mix_probe)
                 final = _stats(
@@ -238,15 +244,13 @@ class RenderEngine:
             # At most two corrections reuse calibration and preserve the recipe.
             correction = 0
             while True:
-                _, stderr = await run_process(
+                await run_process(
                     self.builder.build(plan, measured), timeout=timeout, on_line=progress
                 )
-                stderr_tail = stderr.decode(errors="replace")[-1000:]
                 info = await probe(plan.output)
-                if not valid_output(info, profile):
-                    raise MediaError(
-                        "compiled output has invalid dimensions, fps, audio or A/V synchronization"
-                    )
+                problem = output_problem(info, profile)
+                if problem is not None:
+                    raise MediaError(f"compiled output is invalid: {problem}")
                 timing = compiled_timing(plan, info)
                 lufs, peak = await measure_loudness(
                     plan.output, start=timing.content_start, end=timing.content_end
@@ -254,7 +258,10 @@ class RenderEngine:
                 if not enforce_peak or peak is None or peak <= ceiling + 0.3:
                     break
                 if correction == 2:
-                    raise MediaError("true peak above ceiling")
+                    raise MediaError(
+                        f"true peak above ceiling: {peak:.2f} dBTP measured, "
+                        f"{ceiling:.2f} dBTP allowed after {correction} corrections"
+                    )
                 plan = replace(
                     plan, peak_reduction_db=(plan.peak_reduction_db + peak - ceiling + 0.2)
                 )
@@ -287,7 +294,12 @@ class RenderEngine:
             # Never delete an original when an invalid plan aliases its output.
             if output_is_safe:
                 plan.output.unlink(missing_ok=True)
-            detail = f"{str(exc)[-1000:]}\n{stderr_tail}".strip()
+            # A successful encode's stderr says nothing about a later check failing, so only the
+            # failure itself is reported (ffmpeg failures already carry their own stderr tail).
+            detail = str(exc).strip() or type(exc).__name__
+            if len(detail) > 1000:
+                # Keep the headline (what failed) and the end (ffmpeg's last words).
+                detail = f"{detail[:200]}\n…\n{detail[-790:]}"
             raise MediaError(detail) from exc
         finally:
             if temporary is not None:

@@ -110,6 +110,7 @@ export const es: Record<keyof typeof en, string> = {
   "library.upload": "Subir clips",
   "library.import": "Importar de Cinema Collections",
   "library.play": "Vista previa de {title}",
+  "library.stop": "Cerrar vista previa de {title}",
   "library.select": "Seleccionar {title}",
   "library.pending": "Render pendiente",
   "library.needsSource": "Falta el archivo fuente",
